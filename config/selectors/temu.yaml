@@ -1,0 +1,79 @@
+# Temu 卖家后台选择器（全部外置，改这里不用动代码）
+#
+# 约定：每个 key 给一个「候选列表」，按顺序尝试，第一个命中的生效。
+# 单个候选可以是：
+#   - CSS 选择器  : "#submit-btn"
+#   - role=名字   : "role=button[name=保存]"   ← 优选，最抗改版
+#   - text=文本   : "text=保存"
+#
+# P1 探测流程：先跑 `temu-bot login --shop "A lovely costume"`，登录成功后
+# 跑 `temu-bot probe --shop "..." --interactive` 把关键页面抓成快照，
+# 然后把下面这些候选按真实元素补全。
+
+urls:
+  # 起始页：店小秘（上架走的是店小秘，不是 Temu 卖家后台）
+  # 用户提供的入口：https://www.dianxiaomi.com/web/home
+  start: https://www.dianxiaomi.com/web/home
+  # Temu 半托管 商品页（已从登录态探测确认）
+  product_list: https://www.dianxiaomi.com/web/popTemu/pageList.json
+  product_edit: https://www.dianxiaomi.com/web/popTemu/edit
+  # 列表状态：dxmState=offline（待发布）| online（在线）| draft（草稿）
+  list_states:
+    offline: 待发布产品
+    online: 在线产品
+    draft: 草稿箱
+
+login:
+  # URL 命中任意一条即认为「未登录」
+  url_patterns:
+    - /login
+    - /passport
+    - signin
+    - sso
+  # 命中任意一条即认为「已登录」（P1 探测后补，留空则退化为"不是登录页就算已登录"）
+  logged_in_candidates: []
+  # 登录表单元素（P1 探测后补，仅用于给用户提示"该点哪里"）
+  login_form_candidates: []
+
+# 商品列表页
+product_list:
+  # 打开列表页后，判断"加载完成"的元素
+  ready: []
+  # 搜索框（按标题/货号查重时会用）
+  search_input: []
+  search_submit: []
+  # 列表行
+  row: []
+  row_title: []
+  row_product_id: []
+
+# 复制模板商品
+clone:
+  # 模板商品行的"复制"按钮
+  copy_button: []
+  # 复制成功后的确认弹窗/按钮
+  confirm_button: []
+
+# 商品编辑页（复制后进入）
+edit:
+  title_input: []
+  # 主图上传 input[type=file]（用 set_input_files，不模拟点击）
+  main_image_input: []
+  material_image_input: []
+  sku_image_input: []
+  # SKU 货号前缀 / 编码输入
+  sku_code_input: []
+  sku_code_prefix_input: []
+  # 保存（真实提交；dry-run 到这一步就停）
+  save_button: []
+  # 保存成功标志（商品ID 或成功提示）
+  saved_product_id: []
+  success_toast: []
+  # 表单校验错误提示（dry-run 用来判断"无红色报错"）
+  validation_error: []
+
+# 相册/图片空间
+album:
+  remaining_quota: []
+  cleanup_button: []
+  confirm_cleanup: []

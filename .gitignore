@@ -1,0 +1,30 @@
+.venv/
+__pycache__/
+*.pyc
+
+# 本地私密配置（AI key、店铺信息）
+config/config.local.yaml
+.env
+
+# 运行期产物 —— **里面有你店铺的登录态（data/state/session_*.json）**，
+# 千万不要提交、也不要跟着打包目录发给别人。
+data/logs/
+data/backups/
+data/reports/
+data/state/
+data/title_cache.sqlite
+profiles/
+work/
+
+# 打包产物与中间文件（`tools/build_app.py` 生成，需要时现打）
+dist/
+build/
+packaging/
+
+# 工具自己的缓存
+.pytest_cache/
+.ruff_cache/
+*.spec
+
+# 桌面旧工具箱给我们留的临时东西
+*.bak-*

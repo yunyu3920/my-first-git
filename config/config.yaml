@@ -1,0 +1,106 @@
+# temu-bot 主配置（可提交；私密项放 config.local.yaml，会被本文件覆盖合并）
+# 路径一律写绝对路径，Windows 反斜杠在 YAML 里安全（不要用未加引号的 \ 开头）。
+
+project:
+  # 输入/回写用的商品表（真相源是 data/state/run.db，这张表只是报表 + 输入）
+  table: C:\Users\A\Desktop\Temu\商品信息表.xlsx
+  sheet_name: Sheet1
+
+toolbox:
+  # 复用用户已有的《图片批处理工具箱》（无 GUI 的 Core.ps1）
+  app_dir: C:\Users\A\Desktop\图片批处理工具箱\app
+  core: Core.ps1
+  ledger: C:\Users\A\Desktop\图片批处理工具箱\app\used_ids.txt
+  powershell: powershell.exe
+  node: node
+
+sheet:
+  header_row: 1
+  # 图片列里多个文件名的分隔符：现有数据每格只有 1 个文件名，所以必须可配。
+  multi_value_separator: "\n"
+  separator_fallback_pattern: '[\n\r,，;；|]+'
+  backup_keep: 20
+  # 回写到表格的状态文案（不破坏你现有筛选习惯）
+  statuses:
+    success: 成功
+    processing: 处理中
+    failed: 失败
+    need_human: 需人工
+
+browser:
+  provider: system_chrome      # playwright_local | system_chrome | zhanfu
+  channel: chrome              # chrome = 本机安装的 Google Chrome（不用 Playwright 自带的 Chromium）
+  executable_path: null        # 需要时可直接写死 chrome.exe 全路径，例如 C:\Program Files\Google\Chrome\Application\chrome.exe
+  headless: false              # 需要人工登录/看页面，默认有头
+  slow_mo_ms: 0
+  viewport:
+    width: 1440
+    height: 900
+  args:
+    - --disable-blink-features=AutomationControlled
+
+shops:
+  # name  = 表格第 10 列「店铺名」里出现的值（业务上的店名）
+  # login = 登录身份 key → profiles/<login> + data/state/session_<login>.json
+  #         不同店在不同店小秘账号/授权下，就配不同的 login，各自独立登录态
+  # expected_dxm_shops = 该登录态下**应该**能看到的店小秘店铺名；
+  #         上架前会核对，不一致必须拦下来（防止整批铺到错店）
+  # 注意：店小秘里的店名可能和表格里写的不一样——以实际核对结果为准
+
+  - name: A hat tshirt
+    login: hat-tshirt
+    expected_dxm_shops: [A hat tshirt]
+    template_spuid: ""          # 待填：这家店的模板商品 SPU（注意别用错店的）
+    throttle:
+      action_min_s: 1.2
+      action_max_s: 3.0
+      every_n: 5
+      rest_min_s: 60
+      rest_max_s: 120
+      max_qps: 1.0
+
+  # 另一家店：需要单独登录一次（它不在上面那个店小秘账号里）
+  # 登录命令： launcher "1-登录店小秘.bat" 里把 --shop 换成 lovely
+  - name: A lovely costume
+    login: lovely
+    expected_dxm_shops: [A lovely costume]
+    template_spuid: "8909735440"   # 表里 98 行用的都是这个模板 SPU
+    throttle:
+      action_min_s: 1.2
+      action_max_s: 3.0
+      every_n: 5
+      rest_min_s: 60
+      rest_max_s: 120
+      max_qps: 1.0
+
+ai:
+  chain: []            # 例如 [zhipu, qwen]；空 = 只用表内标题，不调模型
+  title_max_len: 120   # Temu 英文标题上限，P1 实测后固定
+  prefix_map: {}       # 按店铺加前缀，如 {A lovely costume: ""}
+  suffix_map: {}       # 按店铺加后缀
+  prompts:
+    title_cn: title_cn.j2
+    title_en: title_en.j2
+  providers:
+    - id: zhipu
+      type: openai_compatible
+      base_url: https://open.bigmodel.cn/api/paas/v4
+      model: glm-4v-flash
+      api_key_env: TEMU_BOT_AI_ZHIPU_KEY
+      supports_vision: true
+      timeout_s: 60
+    - id: qwen
+      type: openai_compatible
+      base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+      model: qwen-vl-plus
+      api_key_env: TEMU_BOT_AI_QWEN_KEY
+      supports_vision: true
+      timeout_s: 60
+
+runtime:
+  dry_run: form        # plan（只算不碰浏览器） | form（填到提交前）
+  live: false          # 真实提交必须显式 --live，且单独批准
+  speed: cautious      # cautious | normal | fast
+  human_timeout_s: 900
+  log_level: INFO
+  screenshot_on_error: true
