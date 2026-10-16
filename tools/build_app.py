@@ -68,30 +68,33 @@ README = """temu-bot —— 绿色免安装版
 
 怎么用
 --------
-双击 **启动 temu-bot.bat**，浏览器会自动打开控制台。
+双击「启动 temu-bot.bat」，浏览器会自动打开控制台。
 关掉那个黑窗口就是关掉程序。
+
+详细用法看同目录的「使用手册.txt」—— 那里什么都写了。
 
 首次使用
 --------
 1. 装 Google Chrome（登录店小秘要用系统 Chrome；装过了就跳过）。
-2. 双击 `1-登录店小秘.bat`，在弹出的窗口里登录一次。之后长期复用。
-3. 回到控制台，在「设置 → 路径」里把「商品信息表」改成这台电脑上的表路径。
+2. 双击「1-登录店小秘.bat」，在弹出的窗口里登录一次。之后长期复用。
+3. 回到控制台，在「设置 -> 路径」里把「商品信息表」改成这台电脑上的表路径。
 
 目录里都有什么
 --------------
   temu-bot.exe          程序本体（命令行入口，一般不用直接点它）
   启动 temu-bot.bat     主入口 —— 双击这个
   1-登录店小秘.bat      登录店小秘（要换账号时也用它）
+  使用手册.txt          完整说明书
   config\\config.yaml    配置（路径、速度、店铺提示等，可直接用记事本改）
-  data\\                 日志、备份、ID 台账、登录态（**不要删，也不要用 git 提交**）
+  data\\                 日志、备份、ID 台账、登录态（不要删）
   work\\                 出图/传图的中间产物，可以随时删
   profiles\\             浏览器配置（登录态）
   _internal\\            PyInstaller 带的运行时，别动
 
 注意
 ----
-- 这一整套是**你自己的店铺数据**，别把 data\\ 或 profiles\\ 发给别人。
-- 想升级：把新版整个文件夹覆盖过来，**保留 config\\、data\\、profiles\\** 即可。
+- 这一整套是你自己的店铺数据，别把 data\\ 或 profiles\\ 发给别人。
+- 想升级：把新版整个文件夹覆盖过来，保留 config\\、data\\、profiles\\ 即可。
 """
 
 
@@ -183,6 +186,14 @@ def main() -> int:
 
     (OUT_DIR / "使用说明.txt").write_bytes(README.replace("\n", "\r\n").encode("utf-8"))
     print("  写入 使用说明.txt")
+
+    # 完整手册就是个纯文本，直接照抄过去（不生成 HTML、不写转换脚本）
+    manual_src = ROOT / "docs" / "使用手册.txt"
+    if manual_src.is_file():
+        shutil.copy2(manual_src, OUT_DIR / "使用手册.txt")
+        print("  复制 docs/使用手册.txt")
+    else:
+        print(f"  [警告] 找不到 {manual_src}，包里就没有手册")
 
     total = sum(f.stat().st_size for f in OUT_DIR.rglob("*") if f.is_file())
     print()
