@@ -21,6 +21,11 @@ log = logging.getLogger(__name__)
 
 SELECTORS_RELATIVE = Path("config") / "selectors" / "temu.yaml"
 
+# 登录窗口默认打开这里。**必须是店小秘**——上架全程走的是店小秘的接口，
+# 不是 Temu 卖家后台（seller.kuajingmaihuo.com）。以前兜底值写成 Temu，
+# 结果选择器配置没跟着打包时（打包版就是这样），一登录就打开 Temu 去了。
+DXM_HOME = "https://www.dianxiaomi.com/web/home"
+
 # 内置兜底：即使选择器配置文件丢了/还没补全，也不能把"登录页"误判成"已登录"。
 DEFAULT_LOGIN_URL_PATTERNS: tuple[str, ...] = (
     "/login",
@@ -106,6 +111,19 @@ def load_selectors(cfg: Config) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         log.warning("选择器配置读不了（%s）：%s", path, exc)
         return {}
+
+
+def login_start_url(cfg: Config, url: str | None = None) -> str:
+    """登录窗口该打开哪个地址。
+
+    优先级：命令行/接口显式给的 > `config/selectors/temu.yaml` 的 `urls.start`
+    > **店小秘首页**。兜底值只能是店小秘，不能是 Temu 卖家后台——
+    选择器配置缺失（打包版尤其容易）时，就是靠这个兜底。
+    """
+    if url:
+        return url
+    start = (load_selectors(cfg).get("urls") or {}).get("start")
+    return str(start or DXM_HOME)
 
 
 # ------------------------------------------------------------------ 登录态

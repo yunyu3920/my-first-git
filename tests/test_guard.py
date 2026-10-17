@@ -18,6 +18,37 @@ def test_read_rows_from_sandbox(sandbox):
     assert rows[1].status == "失败"
 
 
+def test_blank_and_partial_rows_are_skipped_not_fatal(sandbox):
+    """表里夹着半空行（有文件夹、没主图）时：直接跳过，并报出是哪一行。
+
+    这类行**绝不能让读表报错**——上架时表里常有整行空白或只填了一半的行。
+    """
+    cfg = sandbox["cfg"]
+    dropped: list[int] = []
+    rows = list(SheetTable.from_config(cfg).iter_rows(dropped=dropped))
+    assert [r.row_index for r in rows] == [2, 3]
+    assert dropped == [4]                      # 第 4 行只有文件夹、没有主图
+
+
+def test_fully_blank_rows_are_skipped(sandbox, tmp_path):
+    """整行空白，以及"刷过格式但没内容"的行，都当空白行跳过。"""
+    from tests.conftest import make_table
+
+    cfg = sandbox["cfg"]
+    cfg.project.table = make_table(
+        tmp_path / "有空行.xlsx",
+        [
+            {},                                                            # 第 2 行：整行空
+            {1: "C:/tmp/a", 2: "a.jpg", 9: "1", 10: "店", 11: "1", 17: "标题"},
+            {},                                                            # 第 4 行：整行空
+        ],
+    )
+    dropped: list[int] = []
+    rows = list(SheetTable.from_config(cfg).iter_rows(dropped=dropped))
+    assert [r.row_index for r in rows] == [3]
+    assert dropped == [2, 4]
+
+
 def test_skip_done_and_only_status_filters(sandbox):
     cfg = sandbox["cfg"]
     st = SheetTable.from_config(cfg)

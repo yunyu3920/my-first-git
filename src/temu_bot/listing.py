@@ -358,7 +358,7 @@ class ListingPipeline:
                 "SHOP_CHECK",
                 Status.FAIL,
                 f"店铺不符，已中止：表里这行要上「{self.row.shop}」，"
-                f"但登录身份「{self.login}」的账号里**没有**这家店。"
+                f"但登录身份「{self.login}」的账号里没有这家店。"
                 f"账号里现有的店：{available}。"
                 f"→ 请确认：① 这个身份该不该用（自动认错的话用 --shop 指明）；"
                 f"② 表里第 10 列店铺名有没有写错。",
@@ -423,7 +423,7 @@ class ListingPipeline:
         self._add(
             "FIND_TEMPLATE",
             Status.FAIL,
-            f"在「{self.row.shop}」(shopId={shop_id}) 里**找不到**模板 SPU {spu}"
+            f"在「{self.row.shop}」(shopId={shop_id}) 里找不到模板 SPU {spu}"
             f"（在线的、待发布的都搜过了）。→ 请确认：① 这个 SPU 确实是这家店的商品；"
             f"② 表里第 11 列模板 SPU 有没有写错；③ 登录身份有没有选对。",
             shop_id=shop_id,

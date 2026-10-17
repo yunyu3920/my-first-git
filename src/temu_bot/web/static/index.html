@@ -22,13 +22,11 @@
     <!-- ===== 自动上架 ===== -->
     <section class="page" data-page="run">
       <h2>自动上架</h2>
-      <div class="sub">按 ①②③ 走一遍就行。图片位置由表格给（第 1 列文件夹 + 图片列文件名），不用另外指定。</div>
 
       <!-- ① 表格 -->
       <div class="stepblock">
         <div class="head">
           <span class="no">1</span><h3>选择表格</h3>
-          <span class="tip">表里写的是图片文件名，工具会按名字去表里指的文件夹找图</span>
         </div>
         <div class="row2">
           <input type="text" id="tablePath" placeholder="C:\...\商品信息表.xlsx">
@@ -43,7 +41,6 @@
       <div class="stepblock">
         <div class="head">
           <span class="no">2</span><h3>选择要跑的行</h3>
-          <span class="tip">勾选后可在下方预览图片，确认没配错图</span>
         </div>
         <div class="toolbar">
           <input type="text" id="rowSearch" placeholder="搜索行号 / 标题 / 店铺 / SKU货号">
@@ -71,7 +68,7 @@
         <div class="head">
           <span class="no">3</span><h3>预览并运行</h3>
         </div>
-        <div id="previewBox" class="card"><div class="kv">在上面勾一行，这里会显示它的图和信息。</div></div>
+        <div id="previewBox" class="card"><div class="kv">未选择行</div></div>
 
         <div class="field">
           <label>运行方式</label>
@@ -79,10 +76,18 @@
             <option value="live">真实执行（会建商品、传图、写数据）</option>
             <option value="dry">干跑（不写任何数据）</option>
           </select>
+        </div>
+
+        <div class="field">
+          <label>店铺核对</label>
+          <div class="toolbar">
+            <button class="ghost" id="checkShopBtn">核对店小秘店铺</button>
+            <button class="ghost" id="openSiteBtn">我自己打开店小秘</button>
+          </div>
+          <div id="shopCheckBox"></div>
           <div class="check" style="margin-top:6px">
             <input type="checkbox" id="openBeforeLive" checked>
-            <span>上架前先打开店小秘<small>自动按表格里的店铺名决定用哪个账号，弹出浏览器让你看一眼；
-              店铺/登录对不上会直接停下提醒你。干跑也会打开（好让你先登好）。</small></span>
+            <span>开始前自动打开店小秘</span>
           </div>
           <div class="msg" id="shopMsg"></div>
         </div>
@@ -100,44 +105,30 @@
 
         <div class="check">
           <input type="checkbox" id="swapImages" checked>
-          <span>强制换图
-            <small>换图规矩：<b>只换主图</b>——新主图顶到轮播第 1 位，<b>模板的其它展示图保留不动</b>，
-            SKU 缩略图跟着换；<b>颜色/尺码一个字都不动</b>。
-            勾上（默认）：每一行都重新传图换图，包括表里已有商品ID 的"续跑"行。</small>
-          </span>
+          <span>强制换图</span>
         </div>
         <div class="check">
           <input type="checkbox" id="cleanImages" checked>
-          <span>自动清理图片
-            <small>真实上架成功后才删掉 <code>work/&lt;行&gt;/</code> 里的中间产物；干跑绝不清理。</small>
-          </span>
+          <span>自动清理图片</span>
         </div>
 
         <div id="runBanner"></div>
         <div class="progress"><i id="runBar"></i></div>
 
-        <div class="hint" style="margin-bottom:6px">
-          快捷键：在这个页面上按 <b>回车</b> = 开始（在搜索框里按回车是搜索）。
-        </div>
         <button class="primary big" id="start">开始</button>
-        <button class="ghost" id="stop" style="width:100%; margin-top:8px" disabled>
-          停止（当前这一行会跑完，不中断）
-        </button>
+        <button class="ghost" id="stop" style="width:100%; margin-top:8px" disabled>停止</button>
         <div class="msg" id="runMsg"></div>
       </div>
 
       <div class="stepblock">
         <div class="head"><h3>运行结果</h3></div>
-        <div id="results"><div class="kv" style="color:var(--muted)">还没跑过。</div></div>
+        <div id="results"><div class="kv" style="color:var(--muted)">未运行</div></div>
       </div>
     </section>
 
     <!-- ===== 收集文件 ===== -->
     <section class="page" data-page="collect">
       <h2>收集文件</h2>
-      <div class="sub">把一个文件夹里的图整理成一张「商品信息表」。
-        规则：<code>ID.jpg</code> 是主图，<code>ID-素材图.jpg</code> 是它的素材图，一对 = 一行。
-        <b>店铺名与模板 SPU 会记住上次填的</b>，下次打开自动带出来。</div>
 
       <div class="stepblock">
         <div class="head">
@@ -150,17 +141,16 @@
             <input type="text" id="collectFolder" placeholder="C:\...\素材目录">
             <button class="primary" id="pickFolder">选择文件夹</button>
           </div>
-          <div class="hint" id="collectFolderHint">点「选择文件夹」会打开系统的文件夹窗口</div>
+          <div class="hint" id="collectFolderHint"></div>
           <div class="picker" id="folderPicker"></div>
         </div>
 
         <div class="field">
           <label>收集类型</label>
           <select id="collectType">
-            <option value="top">收集当前所选文件夹的图片（不搜子文件夹）</option>
-            <option value="deep">连同所有子文件夹一起收集</option>
+            <option value="top">当前文件夹（不含子文件夹）</option>
+            <option value="deep">连同所有子文件夹</option>
           </select>
-          <div class="hint">选「整个桌面」这类父目录时，不搜子文件夹会快很多。</div>
         </div>
 
         <div class="grid2">
@@ -187,16 +177,23 @@
           </div>
         </div>
 
+        <div class="field">
+          <label>图片文件名清单（可选，按 11 位 ID 填中/英文标题）</label>
+          <div class="row2">
+            <input type="text" id="collectTitleList" placeholder="C:\...\图片文件名清单.xlsx">
+            <button class="ghost" id="pickTitleList">选择文件</button>
+          </div>
+        </div>
+
         <div class="check">
           <input type="checkbox" id="collectSkc">
-          <span>以图片名作为 SKC 货号<small>勾上后第 19 列「SKC货号」会填主图的名字（去扩展名）。</small></span>
+          <span>以图片名作为 SKC 货号</span>
         </div>
       </div>
 
       <div class="stepblock">
         <div class="head">
           <span class="no">2</span><h3>素材图</h3>
-          <span class="tip">找不到 <code>ID-素材图.jpg</code> 的行：勾上「强制生成」就用主图生成一张，不勾就<b>跳过</b></span>
         </div>
         <div class="toolbar">
           <label style="font-weight:600">宽度</label><input type="number" id="collectMatW" value="800" min="1" style="width:90px">
@@ -205,7 +202,6 @@
             <input type="checkbox" id="collectForceMat" checked> 强制生成素材图
           </label>
         </div>
-        <div class="hint">默认勾上：缺素材图就用主图生成一张（按上面的宽高）。不勾，缺素材图的行会被跳过。</div>
       </div>
 
       <div class="stepblock">
@@ -217,7 +213,7 @@
           <span class="spacer"></span>
           <span class="count" id="collectCount"></span>
         </div>
-        <div id="collectBox"><div class="kv" style="color:var(--muted)">先点「扫描预览」看看会收成哪些行。</div></div>
+        <div id="collectBox"></div>
 
         <div class="banner dry" id="collectOutBanner" style="display:none"></div>
         <div class="progress"><i id="collectBar"></i></div>
@@ -229,8 +225,6 @@
     <!-- ===== 图片批处理生成清单（代码里叫 toolbox） ===== -->
     <section class="page" data-page="toolbox">
       <h2>图片批处理生成清单</h2>
-      <div class="sub">给图片发 11 位唯一 ID，同时留一份「ID ↔ 原名」的对照清单。
-        <b>先「预览」看清清单，确认了再「执行」。</b></div>
 
       <div class="stepblock">
         <div class="head">
@@ -248,7 +242,6 @@
       <div class="stepblock">
         <div class="head">
           <span class="no">2</span><h3>11 位 ID - 导表 - 保留 11 位 ID</h3>
-          <span class="tip">加 ID → 导出对照清单 → 还原成纯 11 位 ID</span>
         </div>
         <div class="grid2">
           <div class="field">
@@ -262,17 +255,11 @@
         </div>
         <div class="toolbar">
           <label style="display:flex;gap:6px;align-items:center;font-weight:400">
-            <input type="checkbox" id="tbExportCsv" checked> 生成 CSV
+            <input type="checkbox" id="tbExportCsv" checked> 生成 CSV（老脚本用）
           </label>
           <label style="display:flex;gap:6px;align-items:center;font-weight:400">
-            <input type="checkbox" id="tbExportXlsx" checked> 生成 XLSX（Excel 表格）
+            <input type="checkbox" id="tbExportXlsx" checked> 生成 XLSX（Excel 打开用这个，ID 是文本）
           </label>
-        </div>
-        <div class="hint">
-          跑完文件名是<b>纯 11 位 ID</b>，原名留在清单里。<br>
-          已经带 11 位 ID 前缀的文件会<b>沿用原 ID</b>，不会叠出第二个（重复跑安全）。<br>
-          CSV 是 <b>GBK、无 BOM、行尾带一个空格</b> —— 跟老脚本产出的一模一样，下游流程不用改；
-          同名文件不会被覆盖，会先备份成 <code>.bak-时间戳</code>。
         </div>
         <div class="toolbar">
           <button class="ghost" id="tbRenameScan">预览</button>
@@ -280,7 +267,7 @@
           <span class="spacer"></span>
           <span class="count" id="tbRenameCount"></span>
         </div>
-        <div id="tbRenameBox"><div class="kv" style="color:var(--muted)">先点「预览」看看哪些文件会怎么改。</div></div>
+        <div id="tbRenameBox"></div>
         <div class="msg" id="tbRenameMsg"></div>
       </div>
 
@@ -299,7 +286,6 @@
     <!-- ===== 设置 ===== -->
     <section class="page" data-page="settings">
       <h2>设置</h2>
-      <div class="sub">改动只写进 <code>config.local.yaml</code>（本机覆盖层），主配置 <code>config.yaml</code> 与其注释分毫不动。</div>
       <div id="settingsBody"></div>
       <button class="primary" id="saveSettings">保存设置</button>
       <div class="msg" id="settingsMsg"></div>

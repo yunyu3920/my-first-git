@@ -92,6 +92,9 @@ def test_rows_endpoint_lists_data_rows(client):
     assert data["error"] == ""
     assert len(data["rows"]) == 2
     assert {"row", "shop", "status", "title_cn"} <= set(data["rows"][0])
+    # 沙箱表第 4 行只有文件夹、没有主图 → 空白行，读表时跳过，但要报给前端
+    assert data["dropped"] == [4]
+    assert data["dropped_count"] == 1
 
 
 def test_config_endpoint_never_leaks_secret_values(client, monkeypatch):
@@ -182,13 +185,61 @@ def test_row_thumb_serves_a_scaled_jpeg(client, sandbox, tmp_path):
 
 
 # ------------------------------------------------------------------ 任务
+@pytest.fixture()
+def shop_check_ok(monkeypatch):
+    """单测不真的去问店小秘：默认让「店铺核对」直接通过。
+
+    `precheck_shops` 本身的行为见 `tests/test_shopcheck.py`。
+    """
+    from temu_bot.web import app as web_app
+
+    monkeypatch.setattr(
+        web_app,
+        "precheck_shops",
+        lambda cfg, rows: {"ok": True, "message": "测试里直接通过", "checks": []},
+    )
+
+
 def test_run_without_rows_is_rejected(client):
     res = client.post("/api/run", json={"shop": "hat-tshirt", "rows": []})
     assert res.status_code == 409
     assert "没选" in res.json()["error"]
 
 
-def test_live_run_on_a_new_row_is_allowed_now_that_upload_works(sandbox):
+def test_run_is_blocked_before_anything_when_shop_check_fails(client, monkeypatch):
+    """店铺核对没过 → **一行都不跑**，直接把核对结果带回来。"""
+    from temu_bot.web import app as web_app
+
+    failed = {
+        "ok": False,
+        "message": "⛔ 店铺核对没通过，还没有开始上架：\n· 第 2 行：表里要上「X」…",
+        "checks": [{"shop": "X", "rows": [2], "ok": False, "login": "", "shop_id": "",
+                    "matched_name": "", "message": "没有这家店"}],
+    }
+    monkeypatch.setattr(web_app, "precheck_shops", lambda cfg, rows: failed)
+
+    res = client.post("/api/run", json={"rows": [2], "live": True})
+    assert res.status_code == 409
+    body = res.json()
+    assert body["shop_check"]["ok"] is False
+    assert body["started"] is False
+    assert client.temu_state.runner.state.value == "idle"    # 没有起任务
+
+
+def test_shops_precheck_endpoint_reports_result(client, monkeypatch):
+    from temu_bot.web import app as web_app
+
+    monkeypatch.setattr(
+        web_app,
+        "precheck_shops",
+        lambda cfg, rows: {"ok": True, "message": "通过", "checks": [{"shop": "X", "rows": [2], "ok": True}]},
+    )
+    res = client.post("/api/shops/precheck", json={"rows": [2]})
+    assert res.status_code == 200
+    assert res.json()["ok"] is True
+
+
+def test_live_run_on_a_new_row_is_allowed_now_that_upload_works(sandbox, shop_check_ok):
     """新行可以真跑了。
 
     图片上传接通之前这里是被硬拦的（复制出来只改标题、图还是模板的，会得到错商品）。
@@ -221,7 +272,7 @@ def test_live_run_on_a_new_row_is_allowed_now_that_upload_works(sandbox):
         runner.wait(timeout=20)
 
 
-def test_dry_run_on_a_new_row_is_still_allowed(client, sandbox):
+def test_dry_run_on_a_new_row_is_still_allowed(client, sandbox, shop_check_ok):
     """干跑不受这条闸限制——干跑不写数据，正是用来看清风险的。"""
     from tests.conftest import make_table
 
@@ -235,7 +286,7 @@ def test_dry_run_on_a_new_row_is_still_allowed(client, sandbox):
     client.temu_state.runner.wait(timeout=20)
 
 
-def test_live_run_allowed_when_the_row_already_has_a_product_id(sandbox, monkeypatch):
+def test_live_run_allowed_when_the_row_already_has_a_product_id(sandbox, monkeypatch, shop_check_ok):
     """已有商品ID 的行续跑是安全的（不复制、不改图），不该被拦。"""
     from temu_bot.web.app import AppState, create_app
     from temu_bot.web.jobs import JobRunner
@@ -265,6 +316,34 @@ def test_job_snapshot_endpoint(client):
     data = client.get("/api/jobs/current").json()
     assert data["state"] == "idle"
     assert data["busy"] is False
+
+
+def test_one_failed_row_does_not_stop_the_batch(sandbox):
+    """某一行跑挂了，只记这一行的错，**后面的行照常跑**。
+
+    用户要求：表里的一行有问题不要打断整批上架。
+    """
+    from temu_bot.listing import ListingOutcome
+    from temu_bot.web.jobs import JobRunner, RunRequest
+
+    class Boom:
+        def __init__(self, cfg_, row, request):
+            self.row = row
+
+        def run(self):
+            if self.row.row_index == 2:
+                raise RuntimeError("这一行故意跑挂")
+            return ListingOutcome(row_key=self.row.row_key, shop=self.row.shop)
+
+    runner = JobRunner(pipeline_factory=lambda c, r, q: Boom(c, r, q))
+    runner.start(sandbox["cfg"], RunRequest(row_indexes=[2, 3], live=False))
+    runner.wait(timeout=20)
+
+    assert runner.state.value == "done"
+    by_row = {r.row_index: r for r in runner.results}
+    assert sorted(by_row) == [2, 3]
+    assert by_row[2].error                     # 第 2 行记下错误
+    assert by_row[3].ok                        # 第 3 行照常跑完
 
 
 def test_cancel_when_idle_is_honest(client):
@@ -468,6 +547,34 @@ def test_collect_scan_is_silent_for_a_known_shop(client, collect_dir, sandbox):
 def test_collect_scan_without_folder_is_rejected(client):
     res = client.post("/api/collect/scan", json={"folder": ""})
     assert res.status_code == 400
+
+
+def test_collect_scan_fills_titles_from_the_list(client, collect_dir, tmp_path):
+    """选了「图片文件名清单」就按 11 位 ID 把中英文标题带进预览。"""
+    import openpyxl
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["数字前缀", "中文后缀 "])
+    ws.append(["11111111111", "中文一"] + [""] * 7 + ["English One"])
+    lst = tmp_path / "图片文件名清单.xlsx"
+    wb.save(lst)
+
+    data = client.post(
+        "/api/collect/scan",
+        json={
+            "folder": str(collect_dir),
+            "shop": "A lovely costume",
+            "title_list": str(lst),
+        },
+    ).json()
+
+    by_stem = {r["stem"]: r for r in data["rows"]}
+    assert by_stem["11111111111"]["title_cn"] == "中文一"
+    assert by_stem["11111111111"]["title_en"] == "English One"
+    assert by_stem["22222222222"]["title_cn"] == ""
+    assert data["title_list"]["ok"] is True
+    assert data["title_list"]["matched"] == 1
 
 
 def test_collect_scan_on_empty_folder_reports_zero(client, tmp_path):

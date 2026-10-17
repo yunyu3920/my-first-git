@@ -105,6 +105,55 @@ def _run(cmd: list[str]) -> None:
         raise SystemExit(f"命令失败（退出码 {proc.returncode}）")
 
 
+# 重新打包时**必须保住**的用户数据：配置、日志/台账/登录态、浏览器 profile。
+# 直接 rmtree(OUT_DIR) 会把店铺登录态一起删掉——那是重登一次都补不回来的东西。
+PRESERVE = ("config", "data", "profiles")
+
+
+def _stash_user_data(out_dir: Path) -> Path | None:
+    """打包前把 `config/`、`data/`、`profiles/` 挪到旁边，打完再放回去。"""
+    if not out_dir.is_dir():
+        return None
+    if not any((out_dir / name).exists() for name in PRESERVE):
+        return None
+
+    stash = out_dir.parent / (out_dir.name + ".keep")
+    if stash.exists():
+        shutil.rmtree(stash)
+    stash.mkdir(parents=True)
+    for name in PRESERVE:
+        src = out_dir / name
+        if src.exists():
+            shutil.move(str(src), str(stash / name))
+            print(f"  先保留 {name}\\（打包完再放回去，别弄丢登录态）")
+    return stash
+
+
+def _restore_user_data(out_dir: Path, stash: Path | None) -> None:
+    """把挪开的用户数据放回去。
+
+    `config/` 用**旧的覆盖新的**：你本机那份 config.yaml 里的路径才是对的；
+    但新版本多出来的文件（比如 `selectors/`）会保留下来。
+    `data/`、`profiles/` 原样搬回。
+    """
+    if stash is None or not stash.exists():
+        return
+    out_dir.mkdir(parents=True, exist_ok=True)
+    old_cfg = stash / "config"
+    if old_cfg.is_dir():
+        (out_dir / "config").mkdir(parents=True, exist_ok=True)
+        shutil.copytree(old_cfg, out_dir / "config", dirs_exist_ok=True)
+    for name in ("data", "profiles"):
+        src = stash / name
+        if src.exists():
+            dst = out_dir / name
+            if dst.exists():
+                shutil.rmtree(dst)
+            shutil.move(str(src), str(dst))
+    shutil.rmtree(stash, ignore_errors=True)
+    print("  已把 config\\、data\\、profiles\\ 放回新包（登录态没丢）")
+
+
 def main() -> int:
     if not (ROOT / ".venv" / "Scripts" / "python.exe").exists():
         raise SystemExit("找不到 .venv，先跑一次 uv sync")
@@ -125,13 +174,31 @@ def main() -> int:
     )
 
     print("== 清掉上次的产物 ==")
+    # 先把用户数据挪开：dist\temu-bot\ 里可能已经有 data\（台账/登录态）和 profiles\，
+    # 直接 rmtree 会一起删掉——那是重登一次都补不回来的东西。
+    stash = _stash_user_data(OUT_DIR)
     for path in (ROOT / "build", OUT_DIR):
-        if path.exists():
+        if not path.exists():
+            continue
+        try:
             shutil.rmtree(path)
-            print(f"  删除 {path}")
+        except OSError as exc:
+            # 文件夹被占着（记事本开着说明/Excel 开着配置/资源管理器停在里面/程序还在跑）。
+            # 先把用户数据放回去，再用一句人话告诉用户关什么。
+            _restore_user_data(OUT_DIR, stash)
+            raise SystemExit(
+                f"删不掉 {path}：{exc}\n"
+                "  多半是还有东西占着这个文件夹。请关掉：\n"
+                "    · 用记事本/Excel 打开着的 使用说明.txt / 使用手册.txt / config.yaml\n"
+                "    · 停在这个文件夹里的资源管理器窗口\n"
+                "    · 还在跑的 temu-bot.exe，或它拉起来的 Chrome 窗口\n"
+                "  然后再跑一次。你的 config\\、data\\、profiles\\ 已经放回原位了。"
+            ) from exc
+        print(f"  删除 {path}")
 
     print("== 跑 PyInstaller ==")
-    _run([
+    try:
+        _run([
         py, "-m", "PyInstaller",
         "--noconfirm",
         "--clean",
@@ -149,13 +216,26 @@ def main() -> int:
         # uvicorn 的协议是运行时动态导入的
         "--collect-submodules", "uvicorn",
         str(entry),
-    ])
+        ])
+    except BaseException:
+        # 打包失败了也要把用户数据放回去（产物可能不完整，但登录态/台账不能丢）
+        _restore_user_data(OUT_DIR, stash)
+        raise
 
     print("== 补上配置、启动器、说明 ==")
     (OUT_DIR / "config").mkdir(parents=True, exist_ok=True)
     src_cfg = ROOT / "config" / "config.yaml"
     shutil.copy2(src_cfg, OUT_DIR / "config" / "config.yaml")
     print(f"  复制 config/config.yaml（照抄当前这份，新电脑上按需改路径）")
+
+    # 选择器/入口地址也得跟着走：登录窗口默认开哪里就写在里面（urls.start）。
+    # 少这一份时程序会回退到内置的店小秘首页，但带上它更稳、也方便以后改地址。
+    selectors_src = ROOT / "config" / "selectors"
+    if selectors_src.is_dir():
+        shutil.copytree(selectors_src, OUT_DIR / "config" / "selectors", dirs_exist_ok=True)
+        print("  复制 config/selectors/")
+    else:
+        print(f"  [警告] 找不到 {selectors_src}，包里就没有选择器配置（不影响登录：会回退到店小秘首页）")
 
     launcher = OUT_DIR / "启动 temu-bot.bat"
     launcher.write_bytes(LAUNCHER.replace("\n", "\r\n").encode("utf-8"))
@@ -196,6 +276,7 @@ def main() -> int:
         print(f"  [警告] 找不到 {manual_src}，包里就没有手册")
 
     total = sum(f.stat().st_size for f in OUT_DIR.rglob("*") if f.is_file())
+    _restore_user_data(OUT_DIR, stash)
     print()
     print(f"== 完成：{OUT_DIR} ==")
     print(f"   共 {total / 1024 / 1024:.0f} MB")

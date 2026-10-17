@@ -88,10 +88,16 @@ class SheetTable:
         only_shop: str | None = None,
         skip_status: tuple[str, ...] = (),
         skip_done: bool = False,
+        dropped: list[int] | None = None,
     ) -> Iterator[SheetRow]:
         """按筛选条件产出数据行。
 
         skip_done=True 时跳过状态为「成功」的行（默认不跳，交给调用方决定）。
+
+        `dropped` 给了的话，把**不算有效数据行**的 Excel 行号追加进去——
+        全空行、以及缺「文件夹路径」/「主图」的半空行都算。这类行**本来就直接跳过**，
+        不会打断读取；记下来只是让控制台能如实说一句"表里有几行空白、已跳开"。
+        注意它只覆盖本次实际扫到的范围（`limit` 到了就不再往后扫）。
         """
         header_row = self.cfg.header_row
         success = self.cfg.statuses.get("success", "成功")
@@ -108,6 +114,8 @@ class SheetTable:
                 fallback_pattern=self.cfg.separator_fallback_pattern,
             )
             if row is None:
+                if dropped is not None:
+                    dropped.append(idx)
                 continue
 
             if row_key and row.row_key != row_key:

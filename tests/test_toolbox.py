@@ -306,6 +306,26 @@ def test_xlsx_looks_like_the_old_one(tmp_path: Path):
     assert ws.column_dimensions["A"].width == 14
     assert ws.column_dimensions["B"].width == 80
     assert ws.max_row == 3
+    # A 列必须是「文本」：不然 Excel 会把 11 位 ID 显示成 5.369E+10，前导 0 也没了
+    assert ws["A2"].number_format == "@"
+    assert ws["A2"].data_type == "s"
+    assert ws["A3"].number_format == "@"
+    wb.close()
+
+
+def test_xlsx_keeps_leading_zeros_as_text(tmp_path: Path):
+    """00128479653 这种带前导 0 的 ID，读回来必须一个字都不差。"""
+    from openpyxl import load_workbook
+
+    folder = tmp_path / "素材"
+    folder.mkdir()
+    make_image(folder / "00128479653-裙子.jpg")
+    listing.run(folder, fmt="xlsx")
+
+    wb = load_workbook(folder / "图片文件名清单.xlsx")
+    ws = wb[listing.XLSX_SHEET]
+    assert ws["A2"].value == "00128479653"
+    assert isinstance(ws["A2"].value, str)
     wb.close()
 
 

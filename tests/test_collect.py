@@ -275,6 +275,102 @@ def test_check_main_images_is_empty_when_all_good(tmp_path: Path):
     assert check_main_images(scan_folder(opts(root))) == {}
 
 
+# ------------------------------------------------------------------ 图片文件名清单 → 中/英文标题
+def make_title_list(path: Path, rows: list[tuple[str, str, str]], *, english_col: int = 10) -> Path:
+    """造一份和用户实际文件同构的清单：A=ID、B=中文、J=英文。"""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "图片文件名清单"
+    ws.append(["数字前缀", "中文后缀 "])
+    for key, cn, en in rows:
+        # C..I 留空，英文放在 J 列（用户实际就是这样）
+        ws.append([key, cn] + [""] * (english_col - 3) + [en])
+    wb.save(path)
+    return path
+
+
+def test_titles_filled_by_11_digit_id(src: Path, tmp_path: Path):
+    lst = make_title_list(
+        tmp_path / "图片文件名清单.xlsx",
+        [
+            ("00742093597", "男士休闲图案印花短袖T恤夏季", "Men's T-Shirt Casual Graphic Print"),
+            ("01409714133", "男士短袖圆领T恤万圣节南瓜", "Men's Halloween Pumpkin T-Shirt"),
+        ],
+    )
+    result = scan_folder(opts(src, title_list=lst))
+    by_stem = {r.sku_prefix: r for r in result.rows}
+
+    assert by_stem["00742093597"].title_cn == "男士休闲图案印花短袖T恤夏季"
+    assert by_stem["00742093597"].title_en == "Men's T-Shirt Casual Graphic Print"
+    assert by_stem["01409714133"].title_en == "Men's Halloween Pumpkin T-Shirt"
+    assert by_stem["01564109050"].title_cn == ""      # 清单里没有这个 ID
+    assert result.titled_rows == 2
+
+
+def test_titles_written_to_columns_17_18(src: Path, tmp_path: Path):
+    lst = make_title_list(
+        tmp_path / "清单.xlsx",
+        [("00742093597", "中文标题", "Men's T-Shirt Casual Graphic Print")],
+    )
+    out = write_table(scan_folder(opts(src, title_list=lst)), tmp_path / "带标题.xlsx")
+
+    ws = openpyxl.load_workbook(out.path).active
+    row2 = [c.value for c in ws[2]]
+    assert row2[schema.COL_TITLE_CN - 1] == "中文标题"
+    assert row2[schema.COL_TITLE_EN - 1] == "Men's T-Shirt Casual Graphic Print"
+    # 没匹配到的那几行留空
+    row3 = [c.value for c in ws[3]]
+    assert row3[schema.COL_TITLE_CN - 1] in (None, "")
+
+
+def test_title_list_matches_leading_zeros(src: Path, tmp_path: Path):
+    """ID 是文本 `00742093597`：绝不能转成 int（前导 0 会丢，就查不到了）。"""
+    lst = make_title_list(tmp_path / "清单.xlsx", [("00742093597", "带前导零", "")])
+    result = scan_folder(opts(src, title_list=lst))
+    by_stem = {r.sku_prefix: r for r in result.rows}
+    assert by_stem["00742093597"].title_cn == "带前导零"
+
+
+def test_title_list_reads_gbk_csv(src: Path, tmp_path: Path):
+    path = tmp_path / "图片文件名清单.csv"
+    path.write_bytes(
+        '"数字前缀","中文后缀 " \r\n"00742093597","中文标题" \r\n'.encode("gbk")
+    )
+    result = scan_folder(opts(src, title_list=path))
+    by_stem = {r.sku_prefix: r for r in result.rows}
+    assert by_stem["00742093597"].title_cn == "中文标题"
+    assert by_stem["00742093597"].title_en == ""      # CSV 没有英文列
+
+
+def test_english_column_shifted_up_one_row_is_realigned(src: Path, tmp_path: Path):
+    """用户那份清单：A1 是表头，J1 却已经是一条英文标题 → 英文整列错一行。
+
+    不处理的话，每个商品都会拿到**下一个商品**的英文。这里按顺序重新对齐。
+    """
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["数字前缀", "中文后缀 "] + [""] * 7 + ["English for A"])
+    ws.append(["00742093597", "中文一"] + [""] * 7 + ["English for B"])
+    ws.append(["01409714133", "中文二"] + [""] * 7 + [""])
+    lst = tmp_path / "错一行.xlsx"
+    wb.save(lst)
+
+    result = scan_folder(opts(src, title_list=lst))
+    by_stem = {r.sku_prefix: r for r in result.rows}
+
+    assert result.title_list is not None and result.title_list.shifted is True
+    assert by_stem["00742093597"].title_en == "English for A"
+    assert by_stem["01409714133"].title_en == "English for B"
+
+
+def test_missing_title_list_is_reported_not_fatal(src: Path, tmp_path: Path):
+    result = scan_folder(opts(src, title_list=tmp_path / "没有这个文件.xlsx"))
+    assert result.title_list is not None
+    assert result.title_list.error
+    assert result.rows                              # 收集照常
+    assert all(not r.title_cn for r in result.rows)
+
+
 # ------------------------------------------------------------------ 店铺名核对
 def test_find_unknown_shop_warns_on_a_typo():
     from temu_bot.collect import find_unknown_shop

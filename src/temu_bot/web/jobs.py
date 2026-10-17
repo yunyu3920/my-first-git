@@ -181,10 +181,19 @@ class JobRunner:
             return [r for r in loaded if r is not None]
 
         table = SheetTable.from_config(cfg)
-        rows: list[SheetRow] = []
-        for row in table.iter_rows():
-            if row.row_index in request.row_indexes:
-                rows.append(row)
+        wanted = set(request.row_indexes)
+        rows = [row for row in table.iter_rows() if row.row_index in wanted]
+
+        # 选中的行里，有的可能在页面加载之后被清空/删掉了。这类行读表时就被跳过，
+        # **不报错、不打断整批**——这里只把"你选了但没跑"的行号说清楚，
+        # 免得结果里少了一行还找不到原因。
+        missing = sorted(wanted - {row.row_index for row in rows})
+        if missing:
+            log.warning(
+                "第 %s 行不是有效数据行（全空，或缺「文件夹路径」/「主图」），已跳过；"
+                "其余行照常跑",
+                "、".join(str(i) for i in missing),
+            )
         return rows
 
     def _record_step(self, row_index: int, step: StepResult) -> None:

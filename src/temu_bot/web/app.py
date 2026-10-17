@@ -36,6 +36,7 @@ from temu_bot.web.configio import (
 )
 from temu_bot.web.jobs import BusyError, JobRunner, RunRequest
 from temu_bot.web.logs import LogBuffer
+from temu_bot.web.shopcheck import precheck_shops
 
 log = logging.getLogger(__name__)
 
@@ -156,6 +157,12 @@ class RunPayload(BaseModel):
     swap_images: bool | None = None
 
 
+class ShopCheckPayload(BaseModel):
+    """上架前核对店铺：只传要跑的 Excel 行号，店铺名由后端从表里读。"""
+
+    rows: list[int] = Field(default_factory=list)
+
+
 class ConfigPayload(BaseModel):
     changes: dict[str, Any] = Field(default_factory=dict)
 
@@ -177,6 +184,8 @@ class CollectPayload(BaseModel):
     material_width: int = 800
     material_height: int = 800
     recursive: bool = False
+    # 「图片文件名清单」：给了就按 11 位 ID 把中文/英文标题填进第 17/18 列
+    title_list: str = ""
     live: bool = False
 
 
@@ -328,12 +337,23 @@ def create_app(cfg: Config | None = None, *, state: AppState | None = None) -> F
         skip_done: bool = Query(False),
     ) -> dict[str, Any]:
         st: AppState = request.app.state.temu
+        dropped: list[int] = []
         try:
             table = SheetTable.from_config(st.cfg)
-            rows = [r.to_view() for r in table.iter_rows(limit=limit, skip_done=skip_done)]
+            rows = [
+                r.to_view()
+                for r in table.iter_rows(limit=limit, skip_done=skip_done, dropped=dropped)
+            ]
         except Exception as exc:  # noqa: BLE001
-            return {"rows": [], "error": str(exc)}
-        return {"rows": rows, "error": ""}
+            return {"rows": [], "dropped": [], "dropped_count": 0, "error": str(exc)}
+        # dropped = 表里那些"全空/缺文件夹或主图"的行，读表时就跳过了。
+        # 报给前端只是让用户知道它们被跳开了，不是丢了数据。
+        return {
+            "rows": rows,
+            "dropped": dropped,
+            "dropped_count": len(dropped),
+            "error": "",
+        }
 
     @app.get("/api/fs/list")
     def api_fs_list(
@@ -459,6 +479,22 @@ def create_app(cfg: Config | None = None, *, state: AppState | None = None) -> F
             headers={"Cache-Control": "max-age=120"},
         )
 
+    @app.post("/api/shops/precheck")
+    def api_shops_precheck(request: Request, payload: ShopCheckPayload) -> dict[str, Any]:
+        """上架前先核对这批行用到的店铺。**只读，不启动任何上架动作。**
+
+        用户 2026-10-17：把「核对提醒」和「上架执行」分开。
+        一个店对不上就返回 `ok=false`，前端把话说清楚、**不点开始**。
+        """
+        st: AppState = request.app.state.temu
+        if not payload.rows:
+            return {"ok": False, "message": "还没勾选要跑的行", "checks": []}
+        try:
+            return precheck_shops(st.cfg, payload.rows)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("店铺核对失败")
+            return {"ok": False, "message": f"核对失败：{exc}", "checks": []}
+
     @app.post("/api/shops/verify")
     def api_shops_verify(
         request: Request,
@@ -563,6 +599,20 @@ def create_app(cfg: Config | None = None, *, state: AppState | None = None) -> F
     @app.post("/api/run")
     def api_run(request: Request, payload: RunPayload) -> JSONResponse:
         st: AppState = request.app.state.temu
+
+        if not payload.rows:
+            return JSONResponse({"error": "没选要跑的行"}, status_code=409)
+
+        # **先核对店铺，再决定要不要开跑**（用户 2026-10-17 要求）。
+        # 对不上就直接 409 返回，一行都不跑——绝不出现"98 行各刷一条同样的错误"。
+        # 前端也会先调 /api/shops/precheck 把结果单独显示；这里是第二道闸，
+        # 保证任何调用方（脚本、别的页面）都绕不过去。
+        check = precheck_shops(st.cfg, payload.rows)
+        if not check["ok"]:
+            return JSONResponse(
+                {"error": check["message"], "shop_check": check, "started": False},
+                status_code=409,
+            )
 
         # 真实执行前的硬闸：新行（还没有商品ID）——现在放行了，闸门本身保留着
         # （`LIVE_NEW_ROW_ALLOWED = True`，要临时关掉就改那个常量）。
@@ -716,6 +766,7 @@ def create_app(cfg: Config | None = None, *, state: AppState | None = None) -> F
             force_gen_material=payload.force_material,
             material_size=(max(1, payload.material_width), max(1, payload.material_height)),
             recursive=payload.recursive,
+            title_list=Path(payload.title_list) if payload.title_list.strip() else None,
         )
 
     @app.post("/api/collect/scan")
@@ -750,6 +801,23 @@ def create_app(cfg: Config | None = None, *, state: AppState | None = None) -> F
         # 店铺名写错了会一路错到底（上架时拿它核对店铺），所以现在就提醒
         unknown_shop = find_unknown_shop(st.cfg, payload.shop)
 
+        # 标题清单的匹配情况（没选清单就给空字段）
+        title_info: dict[str, Any] = {}
+        if result.title_list is not None:
+            tl = result.title_list
+            missing = [r.sku_prefix for r in result.rows if not (r.title_cn or r.title_en)]
+            title_info = {
+                "path": str(tl.path),
+                "ok": tl.ok,
+                "error": tl.error,
+                "total": tl.rows,
+                "with_en": tl.with_en,
+                "shifted": tl.shifted,
+                "matched": result.titled_rows,
+                "missing": missing[:50],
+                "missing_count": len(missing),
+            }
+
         return JSONResponse(
             {
                 "folder": str(options.folder),
@@ -760,6 +828,7 @@ def create_app(cfg: Config | None = None, *, state: AppState | None = None) -> F
                 "summary": result.summary(),
                 "unknown_shop": unknown_shop,
                 "known_shops": [s.name for s in st.cfg.shops],
+                "title_list": title_info,
                 "rows": [
                     {
                         "index": r.index,
@@ -768,6 +837,8 @@ def create_app(cfg: Config | None = None, *, state: AppState | None = None) -> F
                         "stem": r.stem,
                         "note": r.note,
                         "problems": problems.get(r.main_name, []),
+                        "title_cn": r.title_cn,
+                        "title_en": r.title_en,
                     }
                     for r in result.rows[:COLLECT_PREVIEW_ROWS]
                 ],
@@ -818,6 +889,7 @@ def create_app(cfg: Config | None = None, *, state: AppState | None = None) -> F
                 "renamed": written.renamed,
                 "original_target": str(written.original_target) if written.original_target else "",
                 "generated_materials": written.generated_materials,
+                "titles_filled": result.titled_rows,
                 "summary": written.summary(),
             }
         )

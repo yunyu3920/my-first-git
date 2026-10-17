@@ -40,13 +40,27 @@ pause
 exit /b 1
 
 :got_git
-echo   [1/4] git 就绪：
+echo   [1/5] git 就绪：
 "%GIT%" --version
 echo         用的是：%GIT%
 
-rem ------------------------------------------------------ 2. 提交者信息
+rem ---------------------------------------------------------- 2. 证书
+rem 这台机器连不上证书吊销服务器，Git 走 Windows 证书链会直接报
+rem CRYPT_E_NO_REVOCATION_CHECK。改用 OpenSSL + Windows 自带的根证书：
+rem 导出成一份 pem 放在 .git 里（不提交），只对这个仓库生效，不降低校验级别。
 echo.
-echo   [2/4] 这个仓库里记的提交者（现在写的是占位的）：
+echo   [2/5] 准备 HTTPS 证书
+if not exist "%~dp0.git\windows-roots.pem" (
+  echo         第一次用，导出 Windows 根证书……
+  powershell -NoProfile -ExecutionPolicy Bypass -Command "$out='%~dp0.git\windows-roots.pem'; $c=@(Get-ChildItem Cert:\LocalMachine\Root, Cert:\CurrentUser\Root -ErrorAction SilentlyContinue); $sb=New-Object System.Text.StringBuilder; foreach($x in $c){[void]$sb.AppendLine('-----BEGIN CERTIFICATE-----'); [void]$sb.AppendLine([Convert]::ToBase64String($x.RawData,'InsertLineBreaks')); [void]$sb.AppendLine('-----END CERTIFICATE-----')}; [IO.File]::WriteAllText($out,$sb.ToString(),(New-Object System.Text.UTF8Encoding($false)))"
+)
+"%GIT%" config http.sslBackend openssl
+"%GIT%" config http.sslCAInfo "%~dp0.git\windows-roots.pem"
+echo         证书已配置好，只对这个仓库生效
+
+rem ------------------------------------------------------ 3. 提交者信息
+echo.
+echo   [3/5] 这个仓库里记的提交者（现在写的是占位的）：
 echo         名字：
 "%GIT%" config user.name
 echo         邮箱：
@@ -65,15 +79,30 @@ if "%EMAIL%"=="" goto skip_author
 "%GIT%" config user.email "%EMAIL%"
 "%GIT%" commit --amend --reset-author --no-edit
 echo         已改成 %NAME% ^<%EMAIL%^>
-goto remote
+goto commit
 
 :skip_author
 echo         跳过，保持原样。
 
-rem ---------------------------------------------------------- 3. 远程
+rem ---------------------------------------------------------- 4. 提交改动
+rem 以前的脚本只 push、不 commit —— 改动一直留在本地，等于白跑。
+:commit
+echo.
+echo   [4/5] 提交这次的改动
+"%GIT%" add -A
+"%GIT%" diff --cached --quiet
+if not errorlevel 1 goto no_changes
+"%GIT%" commit -m "更新代码 %date% %time%"
+echo         已提交。
+goto remote
+
+:no_changes
+echo         没有新改动，跳过提交。
+
+rem ---------------------------------------------------------- 5. 远程
 :remote
 echo.
-echo   [3/4] 接上远程仓库
+echo   [5/5] 接上远程仓库
 echo.
 echo         默认地址：https://github.com/yunyu3920/my-first-git.git
 echo         直接回车用这个，或者现在粘贴你自己的地址。
@@ -97,7 +126,7 @@ echo         已加上 origin：%URL%
 
 rem ---------------------------------------------------------- 4. 推送
 echo.
-echo   [4/4] 推送中……
+echo   推送中……
 echo.
 echo         要是弹出登录窗口，登的是 **你自己的 git 账号**：
 echo           GitHub 现在不收密码 —— 走浏览器授权，或者填 Personal Access Token

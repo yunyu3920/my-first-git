@@ -15,7 +15,6 @@ const MENU = [
   { key: 'run', label: '自动上架', ready: true },
   { key: 'autoMockup', label: '自动套图', ready: false },
   { key: 'psMockup', label: 'PS套图', ready: false },
-  { key: 'aiTitle', label: 'AI标题', ready: false },
   { key: 'collect', label: '收集文件', ready: true },
   { key: 'toolbox', label: '图片批处理生成清单', ready: true, note: '11 位 ID - 导表 - 保留 11 位 ID' },
   { key: 'settings', label: '设置', ready: true },
@@ -38,15 +37,6 @@ const TODO = {
            'psd-tools 对智能对象变换、图层样式、剪贴蒙版支持有限，所以样机 PSD 的图层最好标准化命名：',
            'mockup-base（底图） / print-anchor（定位层，取其 bbox） / print-slot（贴图位置）。',
            '你给样例后我先做单个定位点的套图，跑通再扩到多个。'],
-  },
-  aiTitle: {
-    title: 'AI标题',
-    sub: '按主图生成中文标题并翻译成英文，或清洗表内已有标题。',
-    note: '未完成。后端只有配置骨架，没有调用实现；而且需要 AI key。',
-    body: ['src/temu_bot/ai/ 目录还不存在，prompts/*.j2 模板也没有；ai.chain 当前是空的（= 只用表内标题）。',
-           'config.yaml 里已预置两个 provider：智谱 glm-4v-flash、通义 qwen-vl-plus。',
-           '要用需要你提供其中一个的 API key（只放环境变量，不会写进配置文件、也不进日志）。',
-           '不过有一件事现在就能做：表里已有的英文标题若含非英文字符，属于纯机械清洗（product.py 已实现），不需要 AI。'],
   },
 };
 
@@ -223,57 +213,129 @@ function renderBanner(job) {
       &nbsp;·&nbsp;第 ${job.current_row ?? '-'} 行，已完成 ${job.finished}/${job.total}</div>`;
     return;
   }
-  const failed = (job.results || []).filter((r) => !r.ok).length;
+  const results = job.results || [];
+  const failed = results.filter((r) => !r.ok).length;
+  const okCount = results.length - failed;
   const wbFailed = job.writeback_failed || [];
   const cls = failed || wbFailed.length ? 'live' : 'done';
   const word = { done: '已完成', failed: '失败', cancelled: '已停止' }[job.state] || job.state;
 
   // 店铺/模板这类"开跑就停"的问题，单独拉一条横幅喊出来——
   // 光看结果卡片里的 ❌ 容易漏掉，而这两种情况要人当场改输入（换登录身份 / 改表）。
-  const blocking = [];
-  for (const r of job.results || []) {
+  // **按错误内容去重**：一批 98 行同一个错，只写一条并给出行号范围。
+  const blockingMap = new Map();
+  for (const r of results) {
     for (const s of r.steps || []) {
       if (s.status === 'fail' && (s.name === 'SHOP_CHECK' || s.name === 'FIND_TEMPLATE')) {
-        blocking.push(`第 ${r.row_index} 行 ${s.name}：${s.detail}`);
+        const key = `${s.name}::${s.detail}`;
+        if (!blockingMap.has(key)) blockingMap.set(key, { name: s.name, detail: s.detail, rows: [] });
+        blockingMap.get(key).rows.push(r.row_index);
       }
     }
   }
+  const blocking = [...blockingMap.values()].map(
+    (b) => `第 ${formatRowNumbers(b.rows)} 行 ${b.name}：${b.detail}`
+  );
 
   box.innerHTML = `<div class="banner ${cls}">
-    ${word}：共 ${job.total} 行，成功 ${job.total - failed}，失败 ${failed}
+    ${word}：共 ${job.total} 行，已跑 ${results.length}，成功 ${okCount}，失败 ${failed}
     ${job.live ? '（真实执行）' : '（干跑，未写任何数据）'}</div>` +
     (blocking.length
       ? `<div class="banner live">⛔ <b>已停止上架，需要你先处理：</b><br>` +
-        blocking.map((b) => esc(b)).join('<br>') +
-        `<br><small>程序已经帮你打开了店小秘——在里面把账号登好、或切到表里那家店，` +
-        `关掉浏览器窗口后重新点「开始」。如果表里第 10 列店铺名写错了，改表再跑。</small></div>`
+        blocking.map((b) => esc(b)).join('<br>') + `</div>`
       : '') +
     // 回写失败要单独喊一声：商品建好了（上架是成功的），但表格没记上，
     // 不补写的话下次跑这几行就是重复铺货
     (wbFailed.length
-      ? `<div class="banner live">⚠ 第 ${wbFailed.join('、')} 行的商品ID/状态**没能写回表格**
+      ? `<div class="banner live">⚠ 第 ${wbFailed.join('、')} 行的商品ID/状态<b>没能写回表格</b>
          （多半是表开着 Excel/WPS）。商品已经建好了，别重跑这几行。关掉表后跑
          <code>temu-bot table writeback --live</code> 补上。</div>`
       : '');
 }
 
+/* 一组「错误完全相同」的行，只显示一遍，别把同一条话刷 98 遍。 */
+function failureSignature(r) {
+  if (r.error) return `ERR::${r.error}`;
+  const bad = (r.steps || []).filter((s) => s.status === 'fail');
+  return bad.map((s) => `${s.name}::${s.detail}`).join(' | ') || 'FAILED';
+}
+
+function stepsHtml(steps) {
+  return (steps || []).map((s) => {
+    const icon = { ok: '✅', dry: '🔸', skip: '⏭', fail: '❌' }[s.status] || '·';
+    return `<div class="step"><span class="icon">${icon}</span>` +
+           `<span class="name">${esc(s.name)}</span>` +
+           `<span class="detail">${esc(s.detail)}</span></div>`;
+  }).join('');
+}
+
 function renderResults(job, done, total) {
   const box = $('results');
   box.innerHTML = '';
-  for (const r of job.results) {
+  const results = job.results || [];
+
+  // 按"成功 / 同一种失败"分组
+  const groups = new Map();
+  for (const r of results) {
+    const key = r.ok ? 'ok' : failureSignature(r);
+    let g = groups.get(key);
+    if (!g) { g = { ok: r.ok, items: [], sample: r }; groups.set(key, g); }
+    g.items.push(r);
+  }
+  // 失败在前；同组里行数多的在前
+  const list = [...groups.values()].sort((a, b) => {
+    if (a.ok !== b.ok) return a.ok ? 1 : -1;
+    return b.items.length - a.items.length;
+  });
+
+  // 顶部汇总：一眼看清"哪种错误、各多少行"
+  const failedCount = results.filter((r) => !r.ok).length;
+  const summary = document.createElement('div');
+  summary.className = 'card';
+  summary.innerHTML = `<h3>汇总：共 ${total} 行，成功 ${results.length - failedCount}，失败 ${failedCount}</h3>` +
+    list.map((g) => {
+      const rows = g.items.map((r) => r.row_index);
+      let label = '成功';
+      if (!g.ok) {
+        const bad = (g.sample.steps || []).filter((s) => s.status === 'fail').map((s) => s.name);
+        label = bad.length ? bad.join(' + ') : '出错';
+      }
+      return `<div class="kv">${g.ok ? '✅' : '❌'} ${esc(label)}：` +
+             `${g.items.length} 行（第 ${formatRowNumbers(rows)} 行）</div>`;
+    }).join('');
+  box.appendChild(summary);
+
+  for (const g of list) {
+    const rows = g.items.map((r) => r.row_index);
+    const range = formatRowNumbers(rows);
     const card = document.createElement('div');
     card.className = 'card';
-    const badge = r.ok ? '<span class="badge ok">成功</span>' : '<span class="badge bad">有失败步骤</span>';
-    const err = r.error ? `<div class="kv" style="color:var(--bad)">${esc(r.error)}</div>` : '';
-    const steps = (r.steps || []).map((s) => {
-      const icon = { ok: '✅', dry: '🔸', skip: '⏭', fail: '❌' }[s.status] || '·';
-      return `<div class="step"><span class="icon">${icon}</span>` +
-             `<span class="name">${esc(s.name)}</span>` +
-             `<span class="detail">${esc(s.detail)}</span></div>`;
-    }).join('');
-    card.innerHTML = `<h3>第 ${r.row_index} 行 ${badge}</h3>${err}<div class="steps">${steps}</div>`;
+
+    if (g.ok) {
+      // 成功行：一行只留商品ID，点开才看步骤。1 行时直接展开（省一次点击）。
+      const detail = g.items.map(
+        (r) => `<div class="kv">第 ${r.row_index} 行 · 商品ID <code>${esc(r.product_id || '(无)')}</code></div>`
+      ).join('');
+      if (g.items.length === 1) {
+        card.innerHTML = `<h3>第 ${rows[0]} 行 <span class="badge ok">成功</span></h3>` +
+          detail + `<div class="steps">${stepsHtml(g.sample.steps)}</div>`;
+      } else {
+        card.innerHTML = `<details><summary><b>✅ 成功 ${g.items.length} 行</b>` +
+          `（第 ${range} 行）—— 点开看商品ID</summary>${detail}</details>`;
+      }
+      box.appendChild(card);
+      continue;
+    }
+
+    const err = g.sample.error
+      ? `<div class="kv" style="color:var(--bad)">${esc(g.sample.error)}</div>` : '';
+    card.innerHTML =
+      `<h3>第 ${range} 行 <span class="badge bad">有失败步骤</span>` +
+      (g.items.length > 1 ? `<span class="count">共 ${g.items.length} 行，错误完全相同</span>` : '') +
+      `</h3>${err}<div class="steps">${stepsHtml(g.sample.steps)}</div>`;
     box.appendChild(card);
   }
+
   if (done < total) {
     const wait = document.createElement('div');
     wait.className = 'card';
@@ -385,6 +447,8 @@ async function saveTablePath(path) {
 
 /* ------------------------------------------------------------------ 行列表 */
 let allRows = [];
+// 表里"全空 / 缺文件夹或主图"的行号。它们读表时就被跳过，不会参与上架。
+let droppedRows = [];
 const picked = new Set();
 // 用户动过勾选没有？没动过就按"默认全选"处理（第一次拿到行时全勾上）
 let pickedTouched = false;
@@ -397,8 +461,13 @@ async function refreshRows() {
   const skip = $('skipDone').checked;
   const data = await api(`/api/rows?limit=500&skip_done=${skip}`);
   const box = $('rowsBox');
-  if (data.error) { box.innerHTML = `<div class="err" style="padding:10px">${esc(data.error)}</div>`; return; }
+  if (data.error) {
+    droppedRows = [];
+    box.innerHTML = `<div class="err" style="padding:10px">${esc(data.error)}</div>`;
+    return;
+  }
   allRows = data.rows || [];
+  droppedRows = data.dropped || [];
 
   // 状态下拉的选项从数据里来
   const statuses = [...new Set(allRows.map((r) => r.status).filter(Boolean))];
@@ -437,12 +506,35 @@ function filteredRows() {
   });
 }
 
+/* [3,4,6,7,8] → "3、4、6–8"：连续的行号收成区间，免得一长串数字 */
+function formatRowNumbers(nums) {
+  const sorted = [...new Set(nums)].sort((a, b) => a - b);
+  const parts = [];
+  let i = 0;
+  while (i < sorted.length) {
+    let j = i;
+    while (j + 1 < sorted.length && sorted[j + 1] === sorted[j] + 1) j++;
+    parts.push(j > i ? `${sorted[i]}–${sorted[j]}` : `${sorted[i]}`);
+    i = j + 1;
+  }
+  return parts.length > 12 ? parts.slice(0, 12).join('、') + ' 等' : parts.join('、');
+}
+
+/* 表里的空白行/半空行：读表时就跳过了，这里如实说一句，别让人以为少跑了行 */
+function droppedNote() {
+  if (!droppedRows.length) return '';
+  return `<div class="hint" style="padding:8px 10px;border-bottom:1px solid var(--line)">
+      表里另有 <b>${droppedRows.length}</b> 行是空白或不完整的（没有「文件夹路径」或「主图」）：
+      第 ${formatRowNumbers(droppedRows)} 行。<b>已自动跳过，不影响其他行上架。</b>
+    </div>`;
+}
+
 function renderRows() {
   const box = $('rowsBox');
   const rows = filteredRows();
 
   if (!rows.length) {
-    box.innerHTML = `<div class="err" style="padding:10px">没有符合条件的行</div>`;
+    box.innerHTML = `<div class="err" style="padding:10px">没有符合条件的行</div>` + droppedNote();
     updatePickCount();
     return;
   }
@@ -476,7 +568,7 @@ function renderRows() {
       <td class="t" title="${esc(r.main_image)}">${esc(r.main_image)}</td>
     </tr>`;
   }).join('');
-  box.innerHTML = head + body + '</tbody></table>';
+  box.innerHTML = droppedNote() + head + body + '</tbody></table>';
 
   $('checkAll').onchange = (e) => {
     pickedTouched = true;                    // 你动过勾选了，之后不再自动全选
@@ -519,7 +611,7 @@ async function loadPreview() {
   const box = $('previewBox');
   const chosen = selectedRows();
   if (!chosen.length) {
-    box.innerHTML = '<div class="kv" style="color:var(--muted)">在上面勾一行，这里会显示它的图和信息。</div>';
+    box.innerHTML = '<div class="kv" style="color:var(--muted)">未选择行</div>';
     return;
   }
   const row = chosen[0];
@@ -610,10 +702,72 @@ async function openSiteForTable() {
   return api(`/api/browser/open?${q}`, { method: 'POST' });
 }
 
+/* ------------------------------------------------------------ 店铺核对 */
+/* 用户 2026-10-17：先核对店小秘，无误再开始上架；有误就提醒，不要执行上架。
+ * 核对结果单独显示在 #shopCheckBox，不和「运行结果」混在一起。 */
+
+function renderShopCheck(data) {
+  const box = $('shopCheckBox');
+  if (!data) { box.innerHTML = ''; return; }
+  const msg = String(data.message || data.error || '')
+    .split('\n').map((line) => esc(line)).join('<br>');
+  const badge = data.ok
+    ? '<span class="badge ok">通过</span>'
+    : '<span class="badge bad">没通过</span>';
+  const rows = (data.checks || []).map((c) => {
+    const icon = c.ok ? '✅' : '❌';
+    const where = c.rows && c.rows.length ? `第 ${c.rows.join('、')} 行` : '';
+    const who = c.ok ? `登录身份「${c.login}」` : '没找到能上这家店的登录身份';
+    return `<div class="kv">${icon} ${esc(c.shop || '(没填店铺名)')} · ${esc(where)} · ${esc(who)}</div>`;
+  }).join('');
+  box.innerHTML = `<div class="card" style="margin-top:8px">
+      <h3>店铺核对 ${badge}</h3>
+      <div class="kv" style="color:var(--${data.ok ? 'ok' : 'bad'})">${msg}</div>
+      ${rows}
+    </div>`;
+}
+
+async function checkShop(rows) {
+  const list = rows || [...picked];
+  if (!list.length) {
+    say($('runMsg'), '先在 ② 里勾选要跑的行', false);
+    return null;
+  }
+  $('shopCheckBox').innerHTML = '<div class="card"><div class="kv">正在核对店铺（实时读登录账号里的店铺列表）…</div></div>';
+  const data = await api('/api/shops/precheck', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ rows: list }),
+  });
+  renderShopCheck(data);
+  return data;
+}
+
+/** 用户自己打开店小秘（不依赖「开始」）。 */
+async function openSiteManually() {
+  say($('shopMsg'), '正在打开店小秘…');
+  const r = await openSiteForTable();
+  say($('shopMsg'), r.message || r.error || '', !!r.ok);
+}
+
 /* ------------------------------------------------------------------ 运行 */
 async function start() {
   const rows = [...picked];
   if (!rows.length) { say($('runMsg'), '先在 ② 里勾选要跑的行', false); return; }
+
+  // ① 先核对店铺（只读）——对不上就停在这里，**一行都不跑**。
+  //    这样 98 行不会各刷一条一模一样的 SHOP_CHECK 错误。
+  say($('runMsg'), '先核对店铺…');
+  const chk = await checkShop(rows);
+  if (!chk || !chk.ok) {
+    say($('runMsg'), '店铺核对没通过，已停止（没有执行上架）。先看上面「店铺核对」那一块。', false);
+    if ($('openBeforeLive').checked) {
+      // 顺手打开店小秘，好让你当场登录 / 切店
+      const o = await openSiteForTable();
+      say($('shopMsg'), o.message || o.error || '', !!o.ok);
+    }
+    return;
+  }
 
   const live = $('mode').value === 'live';
   const chosen = selectedRows();
@@ -645,8 +799,8 @@ async function start() {
     if (!ok) return;
   }
 
-  // 上架前先把店小秘打开（用户要求）：你可以在窗口里核对店铺、需要的话登录/切店。
-  // 打不开也不拦——真正的把关在流水线的核对那一步。
+  // 自动打开店小秘（可关）：你可以在窗口里自己再看一眼店铺/登录。
+  // 打不开不拦——真正的把关是上面那次核对。
   if ($('openBeforeLive').checked) {
     say($('runMsg'), '正在打开店小秘…');
     const r = await openSiteForTable();
@@ -669,6 +823,7 @@ async function start() {
   });
   if (r.error) {
     say($('runMsg'), r.error, false);
+    if (r.shop_check) renderShopCheck(r.shop_check);
     if (r.blocked_rows) {
       // 把那几行在列表里标出来，方便改选
       for (const n of r.blocked_rows) picked.delete(n);
@@ -706,8 +861,7 @@ async function loadSettings() {
     <div class="card">
       <h3>运行</h3>
       <div class="field"><label>速度档位</label>
-        <select id="setSpeed">${opt(['cautious', 'normal', 'fast'], data.runtime.speed)}</select>
-        <div class="hint">cautious 最慢最稳；会整体缩放动作间隔与长休时间。</div></div>
+        <select id="setSpeed">${opt(['cautious', 'normal', 'fast'], data.runtime.speed)}</select></div>
       <div class="field"><label>日志级别</label>
         <select id="setLogLevel">${opt(['DEBUG', 'INFO', 'WARNING', 'ERROR'], data.runtime.log_level)}</select></div>
       <div class="check"><input type="checkbox" id="setScreenshot" ${data.runtime.screenshot_on_error ? 'checked' : ''}>
@@ -718,25 +872,20 @@ async function loadSettings() {
       <h3>浏览器</h3>
       <div class="kv">provider：${esc(data.browser.provider)}　channel：${esc(data.browser.channel || '(Playwright 自带)')}</div>
       <div class="check"><input type="checkbox" id="setHeadless" ${data.browser.headless ? 'checked' : ''}>
-        <span>无头模式（不显示窗口）<small>需要人工登录时不要开。</small></span></div>
+        <span>无头模式（不显示窗口）</span></div>
       <div class="field"><label>视口宽度</label><input type="number" id="setVw" value="${data.browser.viewport.width}"></div>
       <div class="field"><label>视口高度</label><input type="number" id="setVh" value="${data.browser.viewport.height}"></div>
     </div>
 
     <div class="card">
       <h3>路径</h3>
-      <div class="field"><label>商品信息表</label><input type="text" id="setTable" value="${esc(data.project.table)}">
-        <div class="hint">图片位置由这张表给：第 1 列是文件夹路径，各图片列是文件名。</div></div>
-      <div class="field"><label>旧工具箱目录</label><input type="text" id="setToolbox" value="${esc(data.toolbox.app_dir)}">
-        <div class="hint">桌面那个《图片批处理工具箱》。<b>发 ID / 生成清单这一套已经原生并进本程序，
-          不再需要它</b>——这里只用来把它那份 <code>used_ids.txt</code> 的旧 ID 合并进项目台账
-          （旧目录底下有 <code>app\\used_ids.txt</code>）。</div></div>
+      <div class="field"><label>商品信息表</label><input type="text" id="setTable" value="${esc(data.project.table)}"></div>
+      <div class="field"><label>旧工具箱目录</label><input type="text" id="setToolbox" value="${esc(data.toolbox.app_dir)}"></div>
     </div>
 
     <div class="card">
       <h3>AI 密钥</h3>
       ${providers || '<div class="kv">未配置 provider</div>'}
-      <div class="hint">密钥只从环境变量读，不在网页上显示、也不写进配置文件。</div>
     </div>
 
     <div class="card">
@@ -881,6 +1030,7 @@ function collectPayload(live) {
     material_width: Number($('collectMatW').value) || 800,
     material_height: Number($('collectMatH').value) || 800,
     recursive: $('collectType').value === 'deep',
+    title_list: $('collectTitleList').value.trim(),
     live,
   };
 }
@@ -894,26 +1044,49 @@ function renderCollectScan(data, elapsedMs) {
     const bad = (r.problems || []).length
       ? `<span class="tag bad" title="${esc(r.problems.join('；'))}">规格</span> ${esc(r.problems.join('；'))}`
       : (r.note ? esc(r.note) : '');
+    const title = (r.title_cn || r.title_en)
+      ? `<span title="${esc([r.title_cn, r.title_en].filter(Boolean).join('\n'))}">${esc((r.title_cn || r.title_en).slice(0, 24))}</span>` +
+        (r.title_cn && !r.title_en ? ' <span class="tag">无英文</span>' : '')
+      : '<span style="color:var(--muted)">—</span>';
     return `<tr>
       <td>${r.index}</td>
       <td class="t" title="${esc(r.main)}">${esc(r.main)}</td>
       <td class="t" title="${esc(r.material)}">${esc(r.material) || '<span style="color:var(--bad)">—</span>'}</td>
       <td class="t">${esc(r.stem)}</td>
+      <td class="t">${title}</td>
       <td class="t">${bad}</td>
     </tr>`;
   }).join('');
 
+  // 标题清单的匹配情况（没选清单就没有这一段）
+  const tl = data.title_list || {};
+  let titleLine = '';
+  if (tl.path) {
+    if (tl.error) {
+      titleLine = `<div class="kv" style="color:var(--bad)">标题清单读不了：${esc(tl.error)}</div>`;
+    } else {
+      titleLine = `<div class="kv">标题清单：匹配 ${tl.matched}/${data.row_count} 行｜清单里 ${tl.total} 个 ID（${tl.with_en} 个带英文）` +
+        (tl.shifted
+          ? `　<span style="color:var(--warn)">英文列比 ID 列多一行，已按 ID 自动对齐</span>`
+          : '') +
+        (tl.missing_count
+          ? `　<span style="color:var(--warn)">${tl.missing_count} 个 ID 没找到：${esc((tl.missing || []).slice(0, 10).join('、'))}</span>`
+          : '') +
+        `</div>`;
+    }
+  }
+
   let html = `<div class="card"><h3>扫描结果</h3>
       <div class="kv">${esc(data.summary)}<span style="color:var(--muted)">${elapsed}</span></div>
       <div class="kv">将写出：${esc(data.out_path)}${data.out_renamed ? '　<span class="badge warn">该文件已存在 → 会自动改名另存</span>' : ''}</div>
-      ${data.row_count ? `<div class="kv">列：主图名 → 第 2 列；素材图 → 第 8 列；前缀编码 → 第 9 列；店铺 → 第 10 列；模板SPU → 第 11 列；主图索引 → 第 12 列。</div>` : ''}
+      ${titleLine}
       ${data.spec_problem_count ? `<div class="kv" style="color:var(--warn)">⚠ 有 ${data.spec_problem_count} 行的主图尺寸不符合 Temu 要求（3:4、宽≥1340、高≥1785、≤2MB）——收集不影响，但上架时会被平台打回，建议先修图。</div>` : ''}
     </div>`;
 
   if (rows) {
     html += `<div class="card"><h3>会收成这些行（前 ${Math.min(data.rows.length, 200)} 行）</h3>
       <div class="scrollbox"><table class="rows"><thead><tr>
-        <th style="width:44px">#</th><th>主图</th><th>素材图</th><th>前缀编码</th><th>备注 / 主图规格</th>
+        <th style="width:44px">#</th><th>主图</th><th>素材图</th><th>前缀编码</th><th>标题</th><th>备注 / 主图规格</th>
       </tr></thead><tbody>${rows}</tbody></table></div>
       ${data.rows_truncated ? `<div class="kv">…还有 ${data.rows_truncated} 行未显示</div>` : ''}
     </div>`;
@@ -1037,6 +1210,21 @@ async function pickFolderNative() {
   if (r.cancelled || !r.path) return;
   $('collectFolder').value = r.path;
   $('collectFolderHint').textContent = r.path;
+  collectScan = null;
+  $('collectGo').disabled = true;
+}
+
+/** 选「图片文件名清单」(.xlsx / .csv)——按 11 位 ID 填中英文标题用。 */
+async function pickTitleListNative() {
+  const btn = $('pickTitleList');
+  const r = await askPath('file', {
+    title: '选择图片文件名清单',
+    initial: $('collectTitleList').value || $('collectFolder').value || '',
+    filters: '图片文件名清单|*.xlsx;*.xlsm;*.csv;;所有文件|*.*',
+  }, btn);
+  if (r.error) { say($('collectMsg'), `系统对话框打不开（${r.error}），可以直接在框里粘贴路径。`, false); return; }
+  if (r.cancelled || !r.path) return;
+  $('collectTitleList').value = r.path;
   collectScan = null;
   $('collectGo').disabled = true;
 }
@@ -1184,7 +1372,7 @@ async function doToolbox(tool, live) {
     // 预览过之后才允许执行
     runBtn.disabled = false;
     const failed = (data.counts || {}).failed || 0;
-    say(msg, failed ? `有 ${failed} 项会失败，先看看说明` : '预览完成 —— 确认无误再点「' + tbRunLabel(tool) + '」', failed ? false : undefined);
+    say(msg, failed ? `有 ${failed} 项会失败` : '预览完成', failed ? false : undefined);
   }
 }
 
@@ -1248,6 +1436,7 @@ function resetToolboxButtons() {
 function wire() {
   $('pickTable').onclick = pickTableNative;
   $('pickFolder').onclick = pickFolderNative;
+  $('pickTitleList').onclick = pickTitleListNative;
   $('pickOut').onclick = pickOutputNative;
   $('collectScan').onclick = doCollectScan;
   $('collectGo').onclick = doCollectRun;
@@ -1291,6 +1480,8 @@ function wire() {
   $('rowSearch').oninput = renderRows;
   $('rowStatus').onchange = renderRows;
   $('checkInputs').onclick = checkInputs;
+  $('checkShopBtn').onclick = () => checkShop();
+  $('openSiteBtn').onclick = openSiteManually;
   $('start').onclick = start;
   $('stop').onclick = stop;
   $('saveSettings').onclick = saveSettings;

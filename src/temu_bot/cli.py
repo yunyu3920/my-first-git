@@ -17,7 +17,7 @@ from rich.table import Table
 from temu_bot import __version__
 from temu_bot.browser.base import BrowserError
 from temu_bot.browser.detect import describe_one_line
-from temu_bot.browser.inspect import collect, dump_page, load_selectors, summarize
+from temu_bot.browser.inspect import collect, dump_page, login_start_url, summarize
 from temu_bot.browser.playwright_local import PlaywrightLocalProvider
 from temu_bot.config import Config, ConfigError, ShopCfg, config_paths, load_config, mask_secret
 from temu_bot.dianxiaomi.client import DxmClient, DxmError, NotLoggedIn
@@ -439,8 +439,9 @@ def login(
     所以必须边等边存，不能等关了再存）。
     """
     cfg = _boot()
-    selectors = load_selectors(cfg)
-    start = url or (selectors.get("urls", {}) or {}).get("start") or "https://seller.kuajingmaihuo.com/"
+    # 默认打开**店小秘**（上架走的是它，不是 Temu 卖家后台）。
+    # 选择器配置缺失时也必须回退到店小秘——打包版没带 config/selectors/ 时就是这种情况。
+    start = login_start_url(cfg, url)
     shop_cfg = cfg.shop_or_default(shop)
 
     console.print(f"[bold]店铺[/bold] {shop}    [bold]profile[/bold] {shop_cfg.profile_dir}")
@@ -616,8 +617,7 @@ def record(
     cookie/token 的值不会落盘，只记录"有哪些头、有哪些 cookie 名"。
     """
     cfg = _boot()
-    selectors = load_selectors(cfg)
-    start = url or (selectors.get("urls", {}) or {}).get("start") or "https://www.dianxiaomi.com/"
+    start = login_start_url(cfg, url)
     shop_cfg = cfg.shop_or_default(shop)
 
     from temu_bot.browser.recorder import Recorder
@@ -1320,6 +1320,11 @@ def collect(
     recursive: bool = typer.Option(
         False, "--recursive", help="连同子文件夹一起收集（默认只看所选文件夹这一层）"
     ),
+    title_list: str = typer.Option(
+        "",
+        "--title-list",
+        help="「图片文件名清单」(.xlsx/.csv)：按 11 位 ID 把中/英文标题填进第 17/18 列",
+    ),
     show: int = typer.Option(15, "--show", help="最多打印几行明细"),
     live: bool = typer.Option(False, "--live", help="真的写出表格；默认只报告不写文件"),
 ) -> None:
@@ -1341,6 +1346,7 @@ def collect(
         use_img_name_as_skc=img_name_as_skc,
         force_gen_material=force,
         recursive=recursive,
+        title_list=Path(title_list) if title_list else None,
     )
 
     result = scan_folder(options)
@@ -1353,6 +1359,17 @@ def collect(
     t.add_row("收成行数", f"[green]{len(result.rows)}[/green]")
     t.add_row("跳过", f"[yellow]{len(result.skipped)}[/yellow]" if result.skipped else "0")
     t.add_row("店铺 / 模板SPU", f"{shop or '(空)'} / {template_spu or '(空)'}")
+    if result.title_list is not None:
+        tl = result.title_list
+        if tl.error:
+            t.add_row("标题清单", f"[red]{tl.error}[/red]")
+        else:
+            t.add_row(
+                "标题清单",
+                f"{tl.path.name}｜读到 {tl.rows} 个 ID（{tl.with_en} 个带英文）｜"
+                f"匹配 {result.titled_rows}/{len(result.rows)} 行"
+                + ("｜英文列比 ID 列多一行，已自动对齐" if tl.shifted else ""),
+            )
     console.print(t)
 
     if result.rows:

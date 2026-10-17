@@ -27,6 +27,7 @@ from pathlib import Path
 
 from PIL import Image
 
+from temu_bot.collect.titles import TitleList, load_title_list
 from temu_bot.imaging.resolve import FolderIndex, index_folder
 from temu_bot.imaging.specs import ImageSpec, inspect
 from temu_bot.sheet import schema
@@ -52,6 +53,9 @@ class CollectOptions:
     # 是否连子文件夹里的图一起收集。默认**不**——
     # 一是符合"收集当前所选文件夹的图片"的语义，二是选到父目录时递归会慢很多。
     recursive: bool = False
+    # 「图片文件名清单」：给了就按 11 位 ID 把中文/英文标题填进第 17/18 列。
+    # 等价于用户原来的 VLOOKUP(I2, 清单!$A:$B, 2, 0)，但按文本精确比对（前导 0 不会丢）。
+    title_list: Path | None = None
 
 
 @dataclass(slots=True)
@@ -64,6 +68,9 @@ class ScanRow:
     stem: str = ""
     note: str = ""
     generated_material: bool = False
+    # 从「图片文件名清单」里查到的标题（查不到就留空）
+    title_cn: str = ""
+    title_en: str = ""
 
     @property
     def sku_prefix(self) -> str:
@@ -85,6 +92,13 @@ class ScanResult:
     # 建好的目录索引。留给调用方复用——不带上它的话，后面的主图规格检查
     # 会把整个目录**再扫一遍**（实测占了总耗时的一半以上）。
     index: FolderIndex | None = None
+    # 这次用的「图片文件名清单」（没给就是 None）
+    title_list: TitleList | None = None
+
+    @property
+    def titled_rows(self) -> int:
+        """查到了中文或英文标题的行数。"""
+        return sum(1 for r in self.rows if r.title_cn or r.title_en)
 
     @property
     def ok(self) -> bool:
@@ -193,6 +207,17 @@ def scan_folder(options: CollectOptions, *, index: FolderIndex | None = None) ->
             )
         result.rows.append(row)
 
+    # 按 11 位 ID 去「图片文件名清单」里查标题（用户 2026-10-17 要求）
+    if options.title_list is not None:
+        titles = load_title_list(options.title_list)
+        result.title_list = titles
+        if titles.ok:
+            for row in result.rows:
+                entry = titles.lookup(row.sku_prefix)
+                if entry is not None:
+                    row.title_cn = entry.title_cn
+                    row.title_en = entry.title_en
+
     return result
 
 
@@ -249,11 +274,12 @@ def row_cells(row: ScanRow, options: CollectOptions) -> dict[int, object]:
         schema.COL_SHOP: options.shop,
         schema.COL_TEMPLATE_SPU: options.template_spu,
         schema.COL_MAIN_IMAGE_INDEX: options.main_image_index,
-        # 商品ID / 状态 / 中英标题 / 唯一标识符 / 问题项 留给上架阶段回填
+        # 中英标题：从「图片文件名清单」按 11 位 ID 查（没给清单就留空）
+        schema.COL_TITLE_CN: row.title_cn,
+        schema.COL_TITLE_EN: row.title_en,
+        # 商品ID / 状态 / 唯一标识符 / 问题项 留给上架阶段回填
         schema.COL_PRODUCT_ID: "",
         schema.COL_STATUS: "",
-        schema.COL_TITLE_CN: "",
-        schema.COL_TITLE_EN: "",
         schema.COL_UNIQUE_KEY: "",
         schema.COL_PROBLEM: "",
         schema.COL_VIDEO: "",

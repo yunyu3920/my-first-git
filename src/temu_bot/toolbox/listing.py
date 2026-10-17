@@ -12,6 +12,9 @@
    - 写完**回读核对行数**，不符就报错
 2. **`图片文件名清单.xlsx`** —— 工作表名 `图片文件名清单`，A 列数字前缀 / B 列中文后缀，
    表头加粗、冻结首行、带自动筛选、A 列窄 B 列宽。
+   **A 列整列设成「文本」格式（`@`），值也按字符串写** —— 否则 Excel 会把 11 位 ID
+   显示成 `5.369E+10`，前导 0 也会丢（CSV 没有类型信息，用 Excel 直接打开仍会这样；
+   要按 Excel 看就用这份 xlsx）。
 
 **同名文件不会被覆盖**：目标已存在就先把旧的改名成 `<原名>.bak-<时间戳>`——
 那份清单是原文件名的唯一记录，覆盖掉就找不回来了。
@@ -95,7 +98,14 @@ def write_xlsx(path: Path, entries: list[Entry]) -> None:
     ws.title = XLSX_SHEET
     ws.append(["数字前缀", "中文后缀"])
     for e in entries:
-        ws.append([e.prefix, e.suffix])
+        # 一律用字符串：openpyxl 会把 str 写成文本单元格，不会变成数字
+        ws.append([str(e.prefix), str(e.suffix)])
+
+    # A 列整列标成「文本」（Excel 的 T 类型）。
+    # 只写字符串还不够保险：General 格式下用户双击/编辑一下，Excel 会把它转成数字，
+    # 11 位 ID 就显示成 5.369E+10，前导 0 也没了。
+    for row in range(1, len(entries) + 2):
+        ws.cell(row=row, column=1).number_format = "@"
 
     for cell in ("A1", "B1"):
         ws[cell].font = Font(bold=True)
@@ -111,7 +121,16 @@ def write_xlsx(path: Path, entries: list[Entry]) -> None:
 
     check = load_workbook(path, read_only=True)
     try:
-        actual = check[XLSX_SHEET].max_row
+        ws_check = check[XLSX_SHEET]
+        actual = ws_check.max_row
+        if actual >= 2:
+            # read_only 模式没有 .cell()，用 iter_rows 取 A2
+            cell = next(ws_check.iter_rows(min_row=2, max_row=2, max_col=1))[0]
+            if cell.number_format != "@" or cell.data_type != "s":
+                raise ListingError(
+                    "写完后校验失败：A 列不是文本格式"
+                    f"（number_format={cell.number_format!r}, data_type={cell.data_type!r}）"
+                )
     finally:
         check.close()
     if actual != last:

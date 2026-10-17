@@ -19,6 +19,12 @@ from temu_bot.collect.scan import (
     row_cells,
     scan_folder,
 )
+from temu_bot.collect.titles import (
+    TitleEntry,
+    TitleList,
+    load_title_list,
+    normalize_key,
+)
 from temu_bot.collect.writer import (
     DEFAULT_NAME,
     WriteResult,
@@ -34,12 +40,16 @@ __all__ = [
     "ScanResult",
     "ScanRow",
     "Skipped",
+    "TitleEntry",
+    "TitleList",
     "WriteResult",
     "check_main_images",
     "default_output",
     "find_unknown_shop",
     "is_material_name",
+    "load_title_list",
     "main_image_candidates",
+    "normalize_key",
     "row_cells",
     "safe_output_path",
     "scan_folder",

@@ -114,7 +114,7 @@ class ShopLookup:
             )
         bits = "；".join(f"{s['login']}（{s['reason']}）" for s in self.scanned) or "（没有可用的登录身份）"
         return (
-            f"表里要上「{self.shop}」，但**没有任何登录身份的账号里有这家店**。"
+            f"表里要上「{self.shop}」，但没有任何登录身份的账号里有这家店。"
             f"查过的身份：{bits}。"
             + (f"这些账号里见到过的店：{'、'.join(self.available)}。" if self.available else "")
         )
@@ -183,7 +183,8 @@ def find_login_for_shop(
 
         for s in shops:
             name = str(s.get("name") or "")
-            if name and name not in seen_shops:
+            # 滤掉「手工订单」这类内部占位桶（id=0），别写进"账号里见过哪些店"
+            if name and is_real_shop(s) and name not in seen_shops:
                 seen_shops.append(name)
         if check.ok:
             result.login = login
