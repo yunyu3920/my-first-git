@@ -36,7 +36,8 @@ packaging = [
 # 店小秘改版后的 AI 排障用（`uv sync --group diagnostics`，见 docs/改版应对.md）。
 # **故意不打包**：它只给本机 AI/MCP 用，不增加绿色包的体积。
 diagnostics = [
-    "scrapling[fetchers]>=0.3",
+    # [ai] = fetchers + mcp + markdownify；只装 fetchers 的话 `scrapling mcp` 会缺 `mcp` 模块
+    "scrapling[ai]>=0.5",
 ]
 
 [build-system]

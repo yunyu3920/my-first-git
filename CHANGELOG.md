@@ -16,8 +16,9 @@
 - **`SiteChanged` 分类**：404/405 单独抛出；上架时提示「疑似店小秘接口变更」；
   批次结束后写 `data/reports/diagnose/<时间戳>-site-changed.json`
   （哪行、哪步、哪个端点）。
-- **Scrapling MCP**：可选依赖组 `diagnostics`（`uv sync --group diagnostics`），
+- **Scrapling MCP**：可选依赖组 `diagnostics`（`scrapling[ai]`，含 MCP），
   注册为 MCP server，AI 可以用它打开店小秘页面、抓新接口。**不进绿色包**。
+  注意：`[fetchers]` 不带 `mcp` 模块，必须用 `[ai]`。
 - 顺手修了 `doctor --json` 的崩溃（`Check` 是 `slots=True`，不能用 `__dict__`）。
 - 新文档：`docs/改版应对.md`。
 
