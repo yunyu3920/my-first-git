@@ -88,6 +88,10 @@ class ListingOutcome:
     product_id: str = ""
     # None = 这次不涉及回写（干跑 / 被取消）；True/False = 写回结果
     writeback_ok: bool | None = None
+    # 这次真正传进店小秘图片空间的图（完整 URL）。用来在上架成功后把空间里的图删掉。
+    uploaded_urls: list[str] = field(default_factory=list)
+    # 实际用到的登录身份（删图片空间时要用同一个身份）
+    login: str = ""
 
     @property
     def failed(self) -> bool:
@@ -111,6 +115,8 @@ class ListingOutcome:
             "product_id": self.product_id,
             "failed": self.failed,
             "writeback_ok": self.writeback_ok,
+            "uploaded_urls": list(self.uploaded_urls),
+            "login": self.login,
             "steps": [
                 {"name": s.name, "status": s.status.value, "detail": s.detail, **s.data}
                 for s in self.steps
@@ -369,6 +375,7 @@ class ListingPipeline:
 
         shop_id = str(result.matched_id)
         self._shop_id = shop_id
+        self.outcome.login = self.login
         self._shop_cfg = self.cfg.shop_or_default(self.row.shop)
 
         how = getattr(self, "_login_source", "") or "指定的登录身份"
@@ -652,6 +659,11 @@ class ListingPipeline:
         except DxmError as exc:
             self._add("UPLOAD", Status.FAIL, f"上传图片失败：{exc}")
             return False
+
+        # 记下这次传上去的地址：上架成功后要把图片空间里的这几张删掉（用户 2026-10-18 要求）
+        self.outcome.uploaded_urls = list(self._uploaded_main)
+        if self._uploaded_material:
+            self.outcome.uploaded_urls.append(self._uploaded_material)
 
         self._add(
             "UPLOAD",

@@ -357,6 +357,41 @@ def test_clean_is_skipped_when_the_row_failed(cfg, tmp_path):
     assert cleaned == [], "失败了就不该清理，否则现场都没了"
 
 
+def test_album_cleanup_only_runs_when_publishing(cfg, tmp_path, monkeypatch):
+    """op=2 立即发布成功后才清图片空间；op=1 的草稿还引用着图，不能删。"""
+    import temu_bot.web.album_clean as ac
+
+    calls: list[dict] = []
+
+    def fake_clean(cfg_, login, urls, **kw):
+        calls.append({"login": login, "urls": list(urls)})
+        return ac.AlbumCleanResult(found=len(urls), deleted=len(urls))
+
+    monkeypatch.setattr(ac, "clean_uploaded_images", fake_clean)
+
+    rows = {2: make_row(tmp_path, 2)}
+    runner = make_runner(rows)
+    runner.start(
+        cfg,
+        RunRequest(shop="hat-tshirt", row_indexes=[2], clean_images=True, live=True, op=2),
+    )
+    runner.wait(timeout=30)
+
+    assert calls, "立即发布成功后应该清理图片空间"
+    assert calls[0]["login"] == "hat-tshirt"
+    assert len(calls[0]["urls"]) == 2          # 主图 + 素材图
+
+    calls.clear()
+    rows = {2: make_row(tmp_path, 3)}
+    runner = make_runner(rows)
+    runner.start(
+        cfg,
+        RunRequest(shop="hat-tshirt", row_indexes=[2], clean_images=True, live=True, op=1),
+    )
+    runner.wait(timeout=30)
+    assert calls == [], "仅保存的草稿还引用着图，不能删"
+
+
 def test_real_clean_removes_only_that_rows_work_dir(cfg, tmp_path):
     rows = {2: make_row(tmp_path, 2)}
     other = cfg.work_dir / "别的行" / "out"

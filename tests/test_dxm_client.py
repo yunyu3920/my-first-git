@@ -222,6 +222,40 @@ def test_known_endpoints_hit_expected_paths(sandbox):
     assert ("POST", "/api/product/popTemu/batchPublish.json") in paths
 
 
+def test_album_delete_matches_by_cos_path_not_name(sandbox):
+    """删图片空间里的图：只按 COS 路径精确命中，同名老图不碰。"""
+    cfg = sandbox["cfg"]
+    make_session(cfg)
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/api/album/list.json":
+            name = request.url.params.get("name", "")
+            rows = [
+                {"idStr": "111", "name": name, "imgUrl": "/wxalbum/1/20261018/a.jpg", "lockState": 0},
+                {"idStr": "222", "name": name, "imgUrl": "/wxalbum/1/20261017/old.jpg", "lockState": 0},
+            ]
+            return httpx.Response(
+                200,
+                json={"code": 0, "data": {"picListPage": {"list": rows}}},
+                request=request,
+            )
+        if path == "/api/album/delPic.json":
+            seen["body"] = request.read().decode()
+            return httpx.Response(200, json={"code": 0, "msg": "ok"}, request=request)
+        return httpx.Response(404, request=request)
+
+    with DxmClient(cfg, SHOP, transport=httpx.MockTransport(handler)) as client:
+        found = client.album_find_by_urls(
+            ["https://wxalbum-10001658-cos.dianxiaomi.com/wxalbum/1/20261018/a.jpg"]
+        )
+        assert [i["idStr"] for i in found] == ["111"], "同名的老图不能命中"
+        client.album_delete(["111"])
+
+    assert "ids=111" in seen["body"]
+
+
 def test_copy_product_payload_matches_frontend(sandbox):
     """复制商品的 form 参数必须与前端「选择店铺」弹窗一致。"""
     cfg = sandbox["cfg"]

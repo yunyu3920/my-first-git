@@ -25,6 +25,7 @@ import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -662,6 +663,66 @@ class DxmClient:
     def album_index(self, **payload: Any) -> Any:
         """图片空间：列表与余量（原工具调用 2574 次，含余量检查）。"""
         return self.get_json("/api/album/index.json", params=payload or None, what="album.index")
+
+    def album_list(
+        self,
+        *,
+        name: str = "",
+        page_no: int = 1,
+        page_size: int = 300,
+        file_type: int = 0,
+    ) -> list[dict[str, Any]]:
+        """图片空间里的图片列表。`name` 是**文件名过滤**（可以只传一个名字）。
+
+        返回的每条里有 `idStr`（删除用）、`name`、`imgUrl`（COS 路径）、
+        `lockState`（锁定状态，锁着的不该删）。
+        """
+        data = self.get_json(
+            "/api/album/list.json",
+            params={
+                "name": name,
+                "startTime": "",
+                "endTime": "",
+                "fileType": file_type,
+                "fullCid": "",
+                "pageNo": page_no,
+                "pageSize": page_size,
+            },
+            what="album.list",
+        )
+        page = ((data or {}).get("data") or {}).get("picListPage") or {}
+        return list(page.get("list") or [])
+
+    def album_delete(self, pic_ids: list[str]) -> dict[str, Any]:
+        """按图片空间里的 ID 删除图片。**只删传进来的这些 ID。**
+
+        接口是 `POST /api/album/delPic.json`，form 字段 `ids`，多个用逗号分隔
+        （从图片空间页面的 JS 里实的：`he(a){postForm("/api/album/delPic.json",{ids:a})}`，
+        调用处 `d.map(i=>i.idStr).join()`）。
+        """
+        ids = [str(i) for i in pic_ids if str(i).strip()]
+        if not ids:
+            return {"code": 0, "msg": "没有要删的图片", "data": None}
+        return self.post_json(
+            "/api/album/delPic.json", data={"ids": ",".join(ids)}, what="album.delPic"
+        )
+
+    def album_find_by_urls(self, urls: list[str]) -> list[dict[str, Any]]:
+        """按图片地址在图片空间里找记录。**只按 COS 路径精确匹配，不按名字猜。**
+
+        为什么要按路径：同一个文件名可能被传过多次（每次 COS 路径都不同），
+        按名字找会把以前那些一起带出来。
+        """
+        paths = {urlparse(u).path for u in urls if u}
+        paths.discard("")
+        found: dict[str, dict[str, Any]] = {}
+        for name in {Path(p).name for p in paths}:
+            for item in self.album_list(name=name):
+                if item.get("imgUrl") in paths:
+                    key = str(item.get("idStr") or item.get("id") or "")
+                    if key:
+                        found[key] = item
+        return list(found.values())
 
     def cos_get_sign(self, **payload: Any) -> Any:
         """取对象存储上传签名。参数待录制确认。"""

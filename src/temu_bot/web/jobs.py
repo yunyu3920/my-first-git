@@ -270,7 +270,7 @@ class JobRunner:
 
         # 只在**真实上架且成功**后才清理；干跑绝不清理
         if request.clean_images and request.live and not outcome.failed:
-            self._clean(cfg, row)
+            self._clean(cfg, row, outcome, op=request.op)
 
     @staticmethod
     def _record(cfg: Config, request: RunRequest, row: SheetRow, outcome: ListingOutcome) -> None:
@@ -305,18 +305,43 @@ class JobRunner:
         except OSError as exc:
             log.warning("结果记账失败（不影响上架结果）：%s", exc)
 
-    def _clean(self, cfg: Config, row: SheetRow) -> None:
+    def _clean(
+        self, cfg: Config, row: SheetRow, outcome: ListingOutcome, *, op: int
+    ) -> None:
+        """清本地中间产物 + （发布成功时）清店小秘图片空间里这次传的图。"""
         if self._on_clean is not None:
+            # 测试注入的清理器：不碰真实文件，也不碰图片空间
             self._on_clean(cfg, row.row_key)
             return
+
         target = cfg.work_dir / row.row_key
-        if not target.exists():
+        if target.exists():
+            try:
+                shutil.rmtree(target)
+                log.info("已清理第 %s 行的中间产物：%s", row.row_index, target)
+            except OSError as exc:
+                log.warning("清理失败（不影响上架结果）：%s", exc)
+
+        # 图片空间：只删**这一次**上传的那几张，而且只在「立即发布」成功后删。
+        # op=1 仅保存 / op=3 移入待发布 的商品是草稿，还引用着这些图，删了会坏。
+        if not outcome.uploaded_urls:
             return
-        try:
-            shutil.rmtree(target)
-            log.info("已清理第 %s 行的中间产物：%s", row.row_index, target)
-        except OSError as exc:
-            log.warning("清理失败（不影响上架结果）：%s", exc)
+        if op != 2:
+            log.info(
+                "第 %s 行是 op=%s（不是立即发布），图片空间里的 %d 张图先留着",
+                row.row_index,
+                op,
+                len(outcome.uploaded_urls),
+            )
+            return
+
+        from temu_bot.web.album_clean import clean_uploaded_images
+
+        result = clean_uploaded_images(cfg, outcome.login, outcome.uploaded_urls)
+        if result.error:
+            log.warning("第 %s 行%s", row.row_index, result.summary())
+        else:
+            log.info("第 %s 行%s", row.row_index, result.summary())
 
     def wait(self, timeout: float | None = None) -> None:
         """测试/CLI 用：等任务结束。"""
