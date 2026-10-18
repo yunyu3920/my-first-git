@@ -30,6 +30,7 @@ from urllib.parse import urlparse
 import httpx
 
 from temu_bot.config import Config
+from temu_bot.dianxiaomi.endpoints import SAVE_TOKEN, load_registry
 from temu_bot.dianxiaomi.session import ShopSession, load_session, session_path
 
 log = logging.getLogger(__name__)
@@ -63,6 +64,15 @@ class NotLoggedIn(DxmError):
 
 class ShopMismatch(DxmError):
     """当前登录的店小秘账号里没有目标店铺——绝不能继续，否则会铺到错店。"""
+
+
+class SiteChanged(DxmError):
+    """接口看起来变了（404/405、返回 HTML、返回 JSON 但缺关键字段）。
+
+    单独分出来是为了：
+    - 多候选端点时可以「换下一个再试」；
+    - 上架时能明确告诉用户「疑似店小秘改版」，而不是一句笼统的接口错误。
+    """
 
 
 """店小秘账号里的「店」不全是真店铺。
@@ -268,8 +278,6 @@ SAVE_FIELD_TYPES: dict[str, type] = {
 }
 
 
-# 保存/发布接口路径里那段构建期固定 token（来自前端 service 层）
-SAVE_TOKEN = "3f8c2a97"
 
 # save_product 的 op 取值（前端菜单源码）
 OP_SAVE = 1          # 保存
@@ -367,6 +375,8 @@ class DxmClient:
                 f"店铺「{shop}」的登录态已过期（{self.session_path}）。重跑 login 再试。"
             )
         self._client = self._build_client(timeout=timeout, transport=transport)
+        # 接口端点注册表：路径不再写死在每个方法里，可以从 config/dxm_endpoints.json 覆盖
+        self.endpoints = load_registry(cfg)
 
     # ------------------------------------------------------------ 底层
     @property
@@ -414,6 +424,12 @@ class DxmClient:
             pass
 
     def _parse(self, response: httpx.Response, what: str) -> Any:
+        if response.status_code in (404, 405):
+            # 404/405 基本只有两种可能：路径改名了，或者这个接口没了。
+            # 单独抛 SiteChanged，好让多候选端点和上架流程区分对待。
+            raise SiteChanged(
+                f"{what} HTTP {response.status_code}（接口可能改名了）：{response.text[:300]}"
+            )
         if response.status_code >= 400:
             raise DxmError(f"{what} HTTP {response.status_code}：{response.text[:300]}")
 
@@ -447,13 +463,32 @@ class DxmClient:
         response = self._client.post(path, data=data, json=json)
         return self._parse(response, what)
 
+    def _call_paths(self, op: str, what: str, fetch: Any) -> Any:
+        """按注册表里的候选顺序试。只有 `SiteChanged`（404/405）才换下一个。"""
+        paths = self.endpoints.paths(op)
+        if not paths:
+            raise DxmError(f"{what}：没有为「{op}」配置任何端点")
+        last: Exception | None = None
+        for index, path in enumerate(paths):
+            try:
+                return fetch(path)
+            except SiteChanged as exc:
+                last = exc
+                if index + 1 < len(paths):
+                    log.warning("%s：%s → 换候选 %s", what, exc, paths[index + 1])
+                    continue
+                raise
+        raise last or DxmError(f"{what}：没有可用端点")
+
     # ------------------------------------------------------------ 已知端点
     def user_in(self) -> Any:
         """当前登录账号/店铺信息（健康检查也用它）。"""
-        return self.get_json("/api/userIn.json", what="userIn")
+        return self._call_paths("user_in", "userIn", lambda p: self.get_json(p, what="userIn"))
 
     def user_info(self) -> Any:
-        return self.get_json("/api/userInfo.json", what="userInfo")
+        return self._call_paths(
+            "user_info", "userInfo", lambda p: self.get_json(p, what="userInfo")
+        )
 
     def health_check(self) -> dict[str, Any]:
         """探活：能拿到账号信息才算登录态可用。
@@ -493,7 +528,11 @@ class DxmClient:
 
     def product_page_list(self, **payload: Any) -> Any:
         """半托管商品列表分页（原始返回）。载荷字段已实测确认。"""
-        return self.post_json("/api/popTemuProduct/pageList.json", data=payload, what="popTemu.pageList")
+        return self._call_paths(
+            "product_list",
+            "popTemu.pageList",
+            lambda p: self.post_json(p, data=payload, what="popTemu.pageList"),
+        )
 
     # ------------------------------------------------------------ 列表
     DEFAULT_LIST_PARAMS: dict[str, Any] = {
@@ -567,19 +606,29 @@ class DxmClient:
 
     def offline_counts(self, **payload: Any) -> Any:
         """待发布数量。"""
-        return self.post_json("/api/popTemuProduct/getOfflineCounts.json", data=payload, what="offlineCounts")
+        return self._call_paths(
+            "offline_counts",
+            "offlineCounts",
+            lambda p: self.post_json(p, data=payload, what="offlineCounts"),
+        )
 
     def online_counts(self, **payload: Any) -> Any:
         """在线数量。"""
-        return self.post_json("/api/popTemuProduct/getOnlineCounts.json", data=payload, what="onlineCounts")
+        return self._call_paths(
+            "online_counts",
+            "onlineCounts",
+            lambda p: self.post_json(p, data=payload, what="onlineCounts"),
+        )
 
     # ------------------------------------------------------------ 详情
     def product_edit(self, product_id: str) -> Any:
         """读商品详情（含标题/图片/SKU，用来做模板基线）。"""
-        return self.get_json(
-            "/api/popTemuProduct/edit.json",
-            params={"id": product_id},
-            what=f"popTemu.edit({product_id})",
+        return self._call_paths(
+            "product_edit",
+            f"popTemu.edit({product_id})",
+            lambda p: self.get_json(
+                p, params={"id": product_id}, what=f"popTemu.edit({product_id})"
+            ),
         )
 
     # ------------------------------------------------------------ 账号/店铺/计费
@@ -654,15 +703,21 @@ class DxmClient:
         注意：**复制商品（`copy_product`）实测不扣这里的额度**——复制 6 次前后
         所有桶都没变。所以别把"复制会扣米豆"当作前提。
         """
-        data = self.post_json(
-            "/api/midou/valueService/balanceView.json", data={"types": types}, what="midou.balance"
+        data = self._call_paths(
+            "midou_balance",
+            "midou.balance",
+            lambda p: self.post_json(p, data={"types": types}, what="midou.balance"),
         )
         return (data or {}).get("data", {}) or {}
 
     # ------------------------------------------------------------ 图片空间
     def album_index(self, **payload: Any) -> Any:
         """图片空间：列表与余量（原工具调用 2574 次，含余量检查）。"""
-        return self.get_json("/api/album/index.json", params=payload or None, what="album.index")
+        return self._call_paths(
+            "album_index",
+            "album.index",
+            lambda p: self.get_json(p, params=payload or None, what="album.index"),
+        )
 
     def album_list(
         self,
@@ -677,18 +732,19 @@ class DxmClient:
         返回的每条里有 `idStr`（删除用）、`name`、`imgUrl`（COS 路径）、
         `lockState`（锁定状态，锁着的不该删）。
         """
-        data = self.get_json(
-            "/api/album/list.json",
-            params={
-                "name": name,
-                "startTime": "",
-                "endTime": "",
-                "fileType": file_type,
-                "fullCid": "",
-                "pageNo": page_no,
-                "pageSize": page_size,
-            },
-            what="album.list",
+        params = {
+            "name": name,
+            "startTime": "",
+            "endTime": "",
+            "fileType": file_type,
+            "fullCid": "",
+            "pageNo": page_no,
+            "pageSize": page_size,
+        }
+        data = self._call_paths(
+            "album_list",
+            "album.list",
+            lambda p: self.get_json(p, params=params, what="album.list"),
         )
         page = ((data or {}).get("data") or {}).get("picListPage") or {}
         return list(page.get("list") or [])
@@ -703,8 +759,10 @@ class DxmClient:
         ids = [str(i) for i in pic_ids if str(i).strip()]
         if not ids:
             return {"code": 0, "msg": "没有要删的图片", "data": None}
-        return self.post_json(
-            "/api/album/delPic.json", data={"ids": ",".join(ids)}, what="album.delPic"
+        return self._call_paths(
+            "album_delete",
+            "album.delPic",
+            lambda p: self.post_json(p, data={"ids": ",".join(ids)}, what="album.delPic"),
         )
 
     def album_find_by_urls(self, urls: list[str]) -> list[dict[str, Any]]:
@@ -726,16 +784,26 @@ class DxmClient:
 
     def cos_get_sign(self, **payload: Any) -> Any:
         """取对象存储上传签名。参数待录制确认。"""
-        return self.post_json("/api/cos/getSign.json", data=payload, what="cos.getSign")
+        return self._call_paths(
+            "upload_sign",
+            "cos.getSign",
+            lambda p: self.post_json(p, data=payload, what="cos.getSign"),
+        )
 
     def cos_callback(self, **payload: Any) -> Any:
         """图片上传完成后的回调登记。参数待录制确认。"""
-        return self.post_json("/api/cos/cosDxmCallBack.json", data=payload, what="cos.callback")
+        return self._call_paths(
+            "upload_callback",
+            "cos.callback",
+            lambda p: self.post_json(p, data=payload, what="cos.callback"),
+        )
 
     def upload_from_net(self, ids: str) -> Any:
         """从图片 URL 直接入库（避免本地 PUT）。"""
-        return self.post_json(
-            "/api/album/toUploadPicFromNet.json", data={"ids": ids}, what="album.fromNet"
+        return self._call_paths(
+            "album_from_net",
+            "album.fromNet",
+            lambda p: self.post_json(p, data={"ids": ids}, what="album.fromNet"),
         )
 
     # ------------------------------------------------------------ 图片上传三步
@@ -856,12 +924,17 @@ class DxmClient:
             file = 一个 zip（内含 choiceSave.txt = 商品对象 JSON），字段名 file、文件名 blob
             op   = 1 保存 / 2 立即发布 / 3 保存并移入待发布 / 5 定时发布
         """
-        target = path or f"/api/popTemuProduct/add{SAVE_TOKEN}.json"
         record = self.build_save_payload(product, op)      # 先压成保存接口要的 39 键
         archive = self.build_save_archive(record)          # 再 zip 成 choiceSave.txt
         files = {"file": ("blob", archive, "application/octet-stream")}
-        response = self._client.post(target, files=files, data={"op": str(op)})
-        return self._parse(response, f"save(op={op})")
+
+        def post(target: str) -> Any:
+            response = self._client.post(target, files=files, data={"op": str(op)})
+            return self._parse(response, f"save(op={op})")
+
+        if path:
+            return post(path)
+        return self._call_paths("save", f"save(op={op})", post)
 
     # ------------------------------------------------------------ 搬家 / 发布
     def copy_product(
@@ -888,7 +961,11 @@ class DxmClient:
             "platform": platform,
             "hidePrice": hide_price,
         }
-        return self.post_json("/api/banjia/copyProduct.json", data=payload, what="banjia.copyProduct")
+        return self._call_paths(
+            "copy",
+            "banjia.copyProduct",
+            lambda p: self.post_json(p, data=payload, what="banjia.copyProduct"),
+        )
 
     @staticmethod
     def ids_param(ids: list[str] | str) -> dict[str, str]:
@@ -902,19 +979,25 @@ class DxmClient:
 
         半托管的路径有两种命名空间，默认用新式；旧式见 pddkjProduct/batchPublish3f8c2a97.json。
         """
-        target = path or "/api/product/popTemu/batchPublish.json"
-        return self.post_json(target, data=self.ids_param(ids), what=f"publish({target})")
+        def post(target: str) -> Any:
+            return self.post_json(target, data=self.ids_param(ids), what=f"publish({target})")
+
+        if path:
+            return post(path)
+        return self._call_paths("publish", "publish", post)
 
     def batch_to_wait_publish(self, ids: list[str] | str) -> Any:
         """批量移入待发布。"""
-        return self.post_json(
-            "/api/product/popTemu/batchToWaitPublish.json",
-            data=self.ids_param(ids),
-            what="batchToWaitPublish",
+        return self._call_paths(
+            "to_wait_publish",
+            "batchToWaitPublish",
+            lambda p: self.post_json(p, data=self.ids_param(ids), what="batchToWaitPublish"),
         )
 
     def batch_delete(self, ids: list[str] | str) -> Any:
         """批量删除商品。"""
-        return self.post_json(
-            "/api/product/popTemu/batchDelete.json", data=self.ids_param(ids), what="batchDelete"
+        return self._call_paths(
+            "batch_delete",
+            "batchDelete",
+            lambda p: self.post_json(p, data=self.ids_param(ids), what="batchDelete"),
         )

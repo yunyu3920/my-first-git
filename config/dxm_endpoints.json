@@ -1,0 +1,23 @@
+{
+  "user_in": ["/api/userIn.json"],
+  "user_info": ["/api/userInfo.json"],
+  "product_list": ["/api/popTemuProduct/pageList.json"],
+  "offline_counts": ["/api/popTemuProduct/getOfflineCounts.json"],
+  "online_counts": ["/api/popTemuProduct/getOnlineCounts.json"],
+  "product_edit": ["/api/popTemuProduct/edit.json"],
+  "copy": ["/api/banjia/copyProduct.json"],
+  "save": ["/api/popTemuProduct/add3f8c2a97.json"],
+  "publish": [
+    "/api/product/popTemu/batchPublish.json",
+    "/api/pddkjProduct/batchPublish3f8c2a97.json"
+  ],
+  "to_wait_publish": ["/api/product/popTemu/batchToWaitPublish.json"],
+  "batch_delete": ["/api/product/popTemu/batchDelete.json"],
+  "midou_balance": ["/api/midou/valueService/balanceView.json"],
+  "album_index": ["/api/album/index.json"],
+  "album_list": ["/api/album/list.json"],
+  "album_delete": ["/api/album/delPic.json", "/api/cos/deletePic.json"],
+  "album_from_net": ["/api/album/toUploadPicFromNet.json"],
+  "upload_sign": ["/api/cos/getSign.json"],
+  "upload_callback": ["/api/cos/cosDxmCallBack.json"]
+}

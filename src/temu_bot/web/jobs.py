@@ -93,6 +93,8 @@ class JobRunner:
         self.current_row: int | None = None
         self.error: str = ""
         self.cancelled_requested = False
+        # 有行疑似遇到店小秘接口变更时，写一份诊断报告（给 AI/人排障用）
+        self.site_change_report: str = ""
 
         # 可注入，便于测试时不碰真表、不碰真接口
         self._row_loader = row_loader
@@ -122,6 +124,8 @@ class JobRunner:
             "steps": list(self.steps),
             "results": results,
             "writeback_failed": writeback_failed,
+            "site_change_report": self.site_change_report,
+            "site_changed_rows": self._site_changed_rows(),
         }
 
     # ---------------------------------------------------------- 起任务
@@ -139,6 +143,7 @@ class JobRunner:
             self.current_row = None
             self.error = ""
             self.cancelled_requested = False
+            self.site_change_report = ""
             self._cancel.clear()
 
         self._thread = threading.Thread(
@@ -172,6 +177,7 @@ class JobRunner:
             log.exception("任务失败")
             return
 
+        self._write_site_change_report(cfg, request)
         self.state = JobState.CANCELLED if self._cancel.is_set() else JobState.DONE
         self.current_row = None
 
@@ -271,6 +277,53 @@ class JobRunner:
         # 只在**真实上架且成功**后才清理；干跑绝不清理
         if request.clean_images and request.live and not outcome.failed:
             self._clean(cfg, row, outcome, op=request.op)
+
+    def _site_changed_rows(self) -> list[int]:
+        """哪些行踩到了「疑似接口变更」（SiteChanged）。"""
+        rows: list[int] = []
+        for result in self.results:
+            outcome = result.outcome
+            if outcome is None:
+                continue
+            if any(step.data.get("site_changed") for step in outcome.steps):
+                rows.append(result.row_index)
+        return rows
+
+    def _write_site_change_report(self, cfg: Config, request: RunRequest) -> None:
+        """有行踩到接口变更就留一份报告——给 `diagnose` / AI 排障用。"""
+        rows = self._site_changed_rows()
+        if not rows:
+            return
+
+        details: list[dict[str, Any]] = []
+        for result in self.results:
+            if result.outcome is None or result.row_index not in rows:
+                continue
+            for step in result.outcome.steps:
+                if step.data.get("site_changed"):
+                    details.append(
+                        {"row": result.row_index, "step": step.name, "detail": step.detail}
+                    )
+
+        out_dir = cfg.data_dir / "reports" / "diagnose"
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+            path = out_dir / f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-site-changed.json"
+            payload = {
+                "ts": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+                "login": request.shop,
+                "live": request.live,
+                "op": request.op,
+                "rows": rows,
+                "details": details,
+                "endpoints_file": str(Path(cfg.root) / "config" / "dxm_endpoints.json"),
+                "next": "跑 temu-bot diagnose api；按 docs/改版应对.md 处理",
+            }
+            path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            self.site_change_report = str(path)
+            log.warning("有 %d 行疑似遇到店小秘接口变更，诊断报告：%s", len(rows), path)
+        except OSError as exc:
+            log.warning("写接口变更报告失败（不影响上架结果）：%s", exc)
 
     @staticmethod
     def _record(cfg: Config, request: RunRequest, row: SheetRow, outcome: ListingOutcome) -> None:

@@ -213,6 +213,14 @@ def main() -> int:
         "--add-data", f"{STATIC_SRC}{';' if sys.platform == 'win32' else ':'}{STATIC_DEST}",
         # Playwright 自带 node 驱动器，PyInstaller 扫不到，得整包收
         "--collect-all", "playwright",
+        # 诊断用依赖（Scrapling / patchright）**故意不打包**：它们只给本机 AI 排障，
+        # 带进去会让绿色包从 187MB 涨到 296MB。项目代码里也没有 import 它们。
+        "--exclude-module", "scrapling",
+        "--exclude-module", "patchright",
+        "--exclude-module", "curl_cffi",
+        "--exclude-module", "lxml",
+        "--exclude-module", "browserforge",
+        "--exclude-module", "apify_fingerprint_datapoints",
         # uvicorn 的协议是运行时动态导入的
         "--collect-submodules", "uvicorn",
         str(entry),
@@ -236,6 +244,14 @@ def main() -> int:
         print("  复制 config/selectors/")
     else:
         print(f"  [警告] 找不到 {selectors_src}，包里就没有选择器配置（不影响登录：会回退到店小秘首页）")
+
+    # 接口端点表：店小秘改路径时，改这份 JSON 就行，不用重新打包
+    endpoints_src = ROOT / "config" / "dxm_endpoints.json"
+    if endpoints_src.is_file():
+        shutil.copy2(endpoints_src, OUT_DIR / "config" / "dxm_endpoints.json")
+        print("  复制 config/dxm_endpoints.json")
+    else:
+        print("  [警告] 找不到 config/dxm_endpoints.json，包里就用内置默认端点")
 
     launcher = OUT_DIR / "启动 temu-bot.bat"
     launcher.write_bytes(LAUNCHER.replace("\n", "\r\n").encode("utf-8"))

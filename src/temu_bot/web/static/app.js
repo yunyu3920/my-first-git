@@ -750,6 +750,50 @@ async function openSiteManually() {
   say($('shopMsg'), r.message || r.error || '', !!r.ok);
 }
 
+/* ------------------------------------------------------------ 接口自检 */
+/* 店小秘改版时，先看这里：哪个接口 FAIL，就是哪一块变了。 */
+
+function renderApiCheck(data) {
+  const box = $('dxmCheckBox');
+  if (!data) { box.innerHTML = ''; return; }
+  if (data.note) {
+    box.innerHTML = `<div class="hint">${esc(data.note)}</div>`;
+    return;
+  }
+  const reports = data.reports || [];
+  if (!reports.length) {
+    box.innerHTML = '<div class="hint">没有可检查的登录身份</div>';
+    return;
+  }
+  box.innerHTML = reports.map((rep) => {
+    const badge = rep.ok
+      ? '<span class="badge ok">通过</span>'
+      : '<span class="badge bad">没通过</span>';
+    const rows = (rep.checks || []).map((c) => {
+      const icon = c.skipped ? '⏭' : (c.ok ? '✅' : '❌');
+      const ep = c.endpoint ? `　<code>${esc(c.endpoint)}</code>` : '';
+      return `<div class="kv">${icon} ${esc(c.name)}：${esc(c.detail)}${ep}</div>`;
+    }).join('');
+    const err = rep.error
+      ? `<div class="kv" style="color:var(--bad)">${esc(rep.error)}</div>` : '';
+    return `<div class="card" style="margin-top:8px">
+        <h3>接口自检 · ${esc(rep.login)} ${badge}</h3>${rows}${err}
+      </div>`;
+  }).join('');
+}
+
+async function diagnoseApi() {
+  const rows = [...picked];
+  $('dxmCheckBox').innerHTML = '<div class="card"><div class="kv">正在自检（只读，不会写任何数据）…</div></div>';
+  const data = await api('/api/diagnose/api', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ rows, deep: true }),
+  });
+  renderApiCheck(data);
+  if (data.error) say($('runMsg'), data.error, false);
+}
+
 /* ------------------------------------------------------------------ 运行 */
 async function start() {
   const rows = [...picked];
@@ -824,6 +868,7 @@ async function start() {
   if (r.error) {
     say($('runMsg'), r.error, false);
     if (r.shop_check) renderShopCheck(r.shop_check);
+    if (r.api_check) renderApiCheck(r.api_check);
     if (r.blocked_rows) {
       // 把那几行在列表里标出来，方便改选
       for (const n of r.blocked_rows) picked.delete(n);
@@ -1481,6 +1526,7 @@ function wire() {
   $('rowStatus').onchange = renderRows;
   $('checkInputs').onclick = checkInputs;
   $('checkShopBtn').onclick = () => checkShop();
+  $('dxmCheckBtn').onclick = diagnoseApi;
   $('openSiteBtn').onclick = openSiteManually;
   $('start').onclick = start;
   $('stop').onclick = stop;

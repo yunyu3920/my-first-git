@@ -6,6 +6,7 @@ import json
 import os
 import threading
 import time
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -44,6 +45,7 @@ images_app = typer.Typer(no_args_is_help=True, help="图片管线（按 Temu 规
 toolbox_app = typer.Typer(
     no_args_is_help=True, help="图片工具箱（SKU 重命名 / 导出清单 / 格式转换 / Excel 合并）"
 )
+diagnose_app = typer.Typer(no_args_is_help=True, help="接口自检（店小秘改版后排障）")
 app.add_typer(config_app, name="config")
 app.add_typer(table_app, name="table")
 app.add_typer(browser_app, name="browser")
@@ -51,6 +53,7 @@ app.add_typer(session_app, name="session")
 app.add_typer(dxm_app, name="dxm")
 app.add_typer(images_app, name="images")
 app.add_typer(toolbox_app, name="toolbox")
+app.add_typer(diagnose_app, name="diagnose")
 
 LEVEL_STYLE = {PASS: "green", WARN: "yellow", FAIL: "red"}
 
@@ -128,7 +131,7 @@ def doctor(
     checks = run_doctor(cfg)
 
     if as_json:
-        console.print_json(json.dumps([c.__dict__ for c in checks], ensure_ascii=False))
+        console.print_json(json.dumps([asdict(c) for c in checks], ensure_ascii=False))
     else:
         t = Table(title="temu-bot doctor", show_lines=False, header_style="bold")
         t.add_column("检查项", style="cyan", no_wrap=True)
@@ -139,6 +142,57 @@ def doctor(
         console.print(t)
 
     if has_failure(checks):
+        raise typer.Exit(1)
+
+
+# ------------------------------------------------------------------ diagnose
+@diagnose_app.command("api")
+def diagnose_api(
+    shop: str = typer.Option("", "--shop", help="登录身份；不给就用第一个有登录态的"),
+    deep: bool = typer.Option(False, "--deep", help="顺便读一个商品详情（多验证 edit 接口）"),
+    json_out: str = typer.Option("", "--json-out", help="另存一份 JSON 到这个路径"),
+) -> None:
+    """只读体检：登录态 / 商品列表 / 图片空间（--deep 再加商品详情）。
+
+    店小秘改版后先跑这个：哪一项 FAIL，就是哪一块接口变了。
+    报告同时写到 data/reports/diagnose/，给 AI 排障用。
+    """
+    from temu_bot.diagnose import check_api, pick_login, write_report
+
+    cfg = _boot()
+    login = pick_login(cfg, shop)
+    if not login:
+        console.print("[red]没有任何登录身份——先双击「1-登录店小秘.bat」登录一次[/red]")
+        raise typer.Exit(1)
+
+    report = check_api(cfg, login, deep=deep)
+
+    t = Table(title=f"接口自检（{login}）", header_style="bold")
+    t.add_column("检查项", style="cyan", no_wrap=True)
+    t.add_column("结果", no_wrap=True)
+    t.add_column("详情", overflow="fold")
+    t.add_column("端点", overflow="fold", style="dim")
+    for c in report.checks:
+        status = "跳过" if c.skipped else ("PASS" if c.ok else "FAIL")
+        style = "dim" if c.skipped else ("green" if c.ok else "red")
+        t.add_row(c.name, f"[{style}]{status}[/]", c.detail, c.endpoint)
+    console.print(t)
+
+    if report.error:
+        console.print(f"[red]{report.error}[/red]")
+
+    if json_out:
+        path = Path(json_out)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(report.as_dict(), ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    else:
+        path = write_report(cfg, report)
+    console.print(f"报告：{path}")
+
+    if not report.ok:
+        console.print("[red]接口自检没通过——先别批量上架，按报告处理。[/red]")
         raise typer.Exit(1)
 
 

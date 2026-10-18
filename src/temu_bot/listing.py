@@ -26,6 +26,7 @@ from temu_bot.dianxiaomi.client import (
     OP_PUBLISH,
     OP_SAVE,
     OP_SAVE_TO_WAIT,
+    SiteChanged,
     OP_TIMING,
     DxmClient,
     DxmError,
@@ -122,6 +123,16 @@ class ListingOutcome:
                 for s in self.steps
             ],
         }
+
+
+def _err_text(action: str, exc: Exception) -> str:
+    """把接口错误写成一句人话；404/405 单独点明"疑似改版"。"""
+    if isinstance(exc, SiteChanged):
+        return (
+            f"{action}：疑似店小秘接口变更（{exc}）。"
+            f"先跑 `temu-bot diagnose api` 看是哪一步变了。"
+        )
+    return f"{action}：{exc}"
 
 
 def _clip(text: str, limit: int) -> str:
@@ -355,7 +366,12 @@ class ListingPipeline:
         try:
             result = self._client.verify_shop(self.row.shop)
         except DxmError as exc:
-            self._add("SHOP_CHECK", Status.FAIL, f"核对店铺失败：{exc}")
+            self._add(
+                "SHOP_CHECK",
+                Status.FAIL,
+                _err_text("核对店铺失败", exc),
+                site_changed=isinstance(exc, SiteChanged),
+            )
             return False
 
         if not result.ok:
@@ -402,30 +418,39 @@ class ListingPipeline:
         spu = self.row.template_spu
         shop_id = self._shop_id
 
-        for state in ("online", "offline"):
-            data = self._client.list_products(
-                dxm_state=state,
-                page_size=5,
-                search_type=SEARCH_BY_PLATFORM_ID,
-                search_value=spu,
-                shop_id=shop_id or -1,
-            )
-            for row in ((data.get("page") or {}).get("list")) or []:
-                if shop_id and str(row.get("shopId")) != shop_id:
-                    # 兜底：过滤没生效时，别把别家店的商品当成模板
-                    continue
-                self._template = row
-                self._add(
-                    "FIND_TEMPLATE",
-                    Status.OK,
-                    f"在「{self.row.shop}」的「{state}」里找到模板："
-                    f"{str(row.get('productName'))[:30]}"
-                    f"（id={row.get('id')}，状态={row.get('dxmState')}）",
-                    template_id=str(row.get("id")),
-                    template_state=str(row.get("dxmState")),
-                    shop_id=shop_id,
+        try:
+            for state in ("online", "offline"):
+                data = self._client.list_products(
+                    dxm_state=state,
+                    page_size=5,
+                    search_type=SEARCH_BY_PLATFORM_ID,
+                    search_value=spu,
+                    shop_id=shop_id or -1,
                 )
-                return True
+                for row in ((data.get("page") or {}).get("list")) or []:
+                    if shop_id and str(row.get("shopId")) != shop_id:
+                        # 兜底：过滤没生效时，别把别家店的商品当成模板
+                        continue
+                    self._template = row
+                    self._add(
+                        "FIND_TEMPLATE",
+                        Status.OK,
+                        f"在「{self.row.shop}」的「{state}」里找到模板："
+                        f"{str(row.get('productName'))[:30]}"
+                        f"（id={row.get('id')}，状态={row.get('dxmState')}）",
+                        template_id=str(row.get("id")),
+                        template_state=str(row.get("dxmState")),
+                        shop_id=shop_id,
+                    )
+                    return True
+        except DxmError as exc:
+            self._add(
+                "FIND_TEMPLATE",
+                Status.FAIL,
+                _err_text("搜索模板失败", exc),
+                site_changed=isinstance(exc, SiteChanged),
+            )
+            return False
 
         self._add(
             "FIND_TEMPLATE",
@@ -490,7 +515,12 @@ class ListingPipeline:
         try:
             result = self._client.copy_product(template_id, str(shop_id))
         except DxmError as exc:
-            self._add("COPY", Status.FAIL, f"复制失败：{exc}")
+            self._add(
+                "COPY",
+                Status.FAIL,
+                _err_text("复制失败", exc),
+                site_changed=isinstance(exc, SiteChanged),
+            )
             return False
 
         code = (result or {}).get("code")
@@ -657,7 +687,12 @@ class ListingPipeline:
                 elif item.slot == "material":
                     self._uploaded_material = url
         except DxmError as exc:
-            self._add("UPLOAD", Status.FAIL, f"上传图片失败：{exc}")
+            self._add(
+                "UPLOAD",
+                Status.FAIL,
+                _err_text("上传图片失败", exc),
+                site_changed=isinstance(exc, SiteChanged),
+            )
             return False
 
         # 记下这次传上去的地址：上架成功后要把图片空间里的这几张删掉（用户 2026-10-18 要求）
@@ -743,7 +778,12 @@ class ListingPipeline:
         try:
             result = self._client.save_product(product, op=self.op)
         except DxmError as exc:
-            self._add("APPLY", Status.FAIL, f"保存失败：{exc}")
+            self._add(
+                "APPLY",
+                Status.FAIL,
+                _err_text("保存失败", exc),
+                site_changed=isinstance(exc, SiteChanged),
+            )
             return False
 
         if (result or {}).get("code") != 0:

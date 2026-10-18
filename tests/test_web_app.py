@@ -226,6 +226,49 @@ def test_run_is_blocked_before_anything_when_shop_check_fails(client, monkeypatc
     assert client.temu_state.runner.state.value == "idle"    # 没有起任务
 
 
+def test_diagnose_api_route(client, monkeypatch):
+    import temu_bot.diagnose as diag
+    from temu_bot.diagnose import ApiCheck, ApiReport
+
+    monkeypatch.setattr(diag, "pick_login", lambda cfg, wanted="": "hat-tshirt")
+    monkeypatch.setattr(
+        diag,
+        "check_api",
+        lambda cfg, login, deep=False, **kw: ApiReport(
+            login=login, checks=[ApiCheck("登录态 userIn", True, "ok")]
+        ),
+    )
+    monkeypatch.setattr(diag, "write_report", lambda cfg, report: Path("x"))
+
+    data = client.post("/api/diagnose/api", json={"rows": []}).json()
+    assert data["ok"] is True
+    assert data["reports"][0]["login"] == "hat-tshirt"
+
+
+def test_run_is_blocked_when_api_check_fails(client, monkeypatch, shop_check_ok):
+    """店小秘接口变了 → 开跑前就停，一行都不跑。"""
+    import temu_bot.diagnose as diag
+    from temu_bot.diagnose import ApiCheck, ApiReport
+
+    monkeypatch.setattr(diag, "pick_login", lambda cfg, wanted="": "hat-tshirt")
+    monkeypatch.setattr(
+        diag,
+        "check_api",
+        lambda *a, **k: ApiReport(
+            login="hat-tshirt",
+            checks=[ApiCheck("商品列表 pageList", False, "疑似接口变更：HTTP 404")],
+        ),
+    )
+    monkeypatch.setattr(diag, "write_report", lambda *a, **k: Path("x"))
+
+    res = client.post("/api/run", json={"rows": [2], "live": True})
+    assert res.status_code == 409
+    body = res.json()
+    assert body["api_check"]["ok"] is False
+    assert body["started"] is False
+    assert client.temu_state.runner.state.value == "idle"
+
+
 def test_shops_precheck_endpoint_reports_result(client, monkeypatch):
     from temu_bot.web import app as web_app
 

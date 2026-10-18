@@ -2,6 +2,27 @@
 
 ## 0.3.0 — 2026-10-16
 
+### 店小秘改版应对：接口自检 + 候选端点 + 失败留证 + Scrapling MCP
+
+用户 2026-10-18：店小秘改版后程序要能应变、别跑到一半炸。
+
+- **接口契约外置**：新增 `config/dxm_endpoints.json`（+ `dianxiaomi/endpoints.py`）。
+  每个操作可配**多个候选路径**，404/405 自动试下一个；配置写坏会回落内置默认。
+  路径改名时**改 JSON 就行，不用重新打包**。
+- **`temu-bot diagnose api`**：只读探活 `userIn` / `pageList` / `album`
+  （`--deep` 再加 `edit`），逐项 PASS/FAIL，报告写到 `data/reports/diagnose/`。
+- **开跑前两道闸**：店铺核对 → **接口自检**。任一道不过就 409、一行都不跑。
+  控制台上架页新增「接口自检」按钮。
+- **`SiteChanged` 分类**：404/405 单独抛出；上架时提示「疑似店小秘接口变更」；
+  批次结束后写 `data/reports/diagnose/<时间戳>-site-changed.json`
+  （哪行、哪步、哪个端点）。
+- **Scrapling MCP**：可选依赖组 `diagnostics`（`uv sync --group diagnostics`），
+  注册为 MCP server，AI 可以用它打开店小秘页面、抓新接口。**不进绿色包**。
+- 顺手修了 `doctor --json` 的崩溃（`Check` 是 `slots=True`，不能用 `__dict__`）。
+- 新文档：`docs/改版应对.md`。
+
+新增测试：端点注册表 7 条、接口自检 5 条、控制台 2 条。
+
 ### 自动清理图片：连店小秘图片空间里这次传的图一起删
 
 用户 2026-10-18 要求（图片空间有限）。原来「自动清理图片」只删本地

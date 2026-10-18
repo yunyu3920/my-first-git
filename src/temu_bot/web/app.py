@@ -163,6 +163,13 @@ class ShopCheckPayload(BaseModel):
     rows: list[int] = Field(default_factory=list)
 
 
+class DiagnosePayload(BaseModel):
+    """接口自检：可选行号（用来定位登录身份），可选深检。"""
+
+    rows: list[int] = Field(default_factory=list)
+    deep: bool = False
+
+
 class ConfigPayload(BaseModel):
     changes: dict[str, Any] = Field(default_factory=dict)
 
@@ -479,6 +486,52 @@ def create_app(cfg: Config | None = None, *, state: AppState | None = None) -> F
             headers={"Cache-Control": "max-age=120"},
         )
 
+    def _run_api_check(cfg: Config, rows: list[int], *, deep: bool = False) -> dict[str, Any]:
+        """只读接口自检：先按表格行找出该用哪个登录身份，再逐项探活。"""
+        from temu_bot.diagnose import check_api, pick_login, write_report
+
+        logins: list[str] = []
+        try:
+            shop_check = precheck_shops(cfg, rows) if rows else {"checks": []}
+            logins = [
+                str(c.get("login"))
+                for c in shop_check.get("checks", [])
+                if c.get("login")
+            ]
+        except Exception:  # noqa: BLE001 - 自检不该因为核对失败而崩
+            logins = []
+
+        if not logins:
+            login = pick_login(cfg, "")
+            if login:
+                logins = [login]
+
+        if not logins:
+            return {
+                "ok": True,
+                "logins": [],
+                "reports": [],
+                "note": "没有可检查的登录身份，跳过",
+            }
+
+        reports = []
+        for login in dict.fromkeys(logins):
+            report = check_api(cfg, login, deep=deep)
+            try:
+                write_report(cfg, report)
+            except OSError as exc:  # noqa: PERF203
+                log.warning("写接口自检报告失败：%s", exc)
+            reports.append(report.as_dict())
+
+        failed = [r for r in reports if not r.get("ok")]
+        return {"ok": not failed, "logins": logins, "reports": reports, "note": ""}
+
+    @app.post("/api/diagnose/api")
+    def api_diagnose(request: Request, payload: DiagnosePayload) -> dict[str, Any]:
+        """接口自检：登录态 / 商品列表 / 图片空间（可选商品详情）。**只读。**"""
+        st: AppState = request.app.state.temu
+        return _run_api_check(st.cfg, payload.rows, deep=payload.deep)
+
     @app.post("/api/shops/precheck")
     def api_shops_precheck(request: Request, payload: ShopCheckPayload) -> dict[str, Any]:
         """上架前先核对这批行用到的店铺。**只读，不启动任何上架动作。**
@@ -611,6 +664,31 @@ def create_app(cfg: Config | None = None, *, state: AppState | None = None) -> F
         if not check["ok"]:
             return JSONResponse(
                 {"error": check["message"], "shop_check": check, "started": False},
+                status_code=409,
+            )
+
+        # 第二道闸：**接口自检**。店小秘改版时，别跑到一半才发现保存接口没了。
+        api_check = _run_api_check(st.cfg, payload.rows)
+        if not api_check["ok"]:
+            first = next(
+                (
+                    c
+                    for r in api_check.get("reports", [])
+                    for c in r.get("checks", [])
+                    if not c.get("ok")
+                ),
+                None,
+            )
+            detail = f"{first['name']}：{first['detail']}" if first else ""
+            return JSONResponse(
+                {
+                    "error": (
+                        f"接口自检没通过，已停止上架：{detail}。"
+                        f"先跑 `temu-bot diagnose api` 看报告，按 docs/改版应对.md 处理。"
+                    ),
+                    "api_check": api_check,
+                    "started": False,
+                },
                 status_code=409,
             )
 
