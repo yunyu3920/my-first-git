@@ -41,9 +41,21 @@ class SheetTable:
         wb = openpyxl.load_workbook(self.path, read_only=True, data_only=True)
         try:
             if self.sheet_name not in wb.sheetnames:
-                raise KeyError(
-                    f"表里没有工作表「{self.sheet_name}」，实际有：{wb.sheetnames}"
-                )
+                # 新用户的表常常只有一张工作表，但名字不叫 Sheet1。
+                # 只有一张时直接用它（并在日志里说明）；多张时不猜，列出名字让人选。
+                if len(wb.sheetnames) == 1:
+                    actual = wb.sheetnames[0]
+                    log.warning(
+                        "配置的工作表「%s」不存在，改用唯一的工作表「%s」",
+                        self.sheet_name,
+                        actual,
+                    )
+                    self.sheet_name = actual
+                else:
+                    raise KeyError(
+                        f"表里没有工作表「{self.sheet_name}」，"
+                        f"实际有：{wb.sheetnames}。请到设置里改对工作表名。"
+                    )
             ws = wb[self.sheet_name]
             for idx, row in enumerate(ws.iter_rows(values_only=True), start=1):
                 cells: dict[int, str] = {}

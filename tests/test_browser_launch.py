@@ -122,6 +122,106 @@ def test_close_when_nothing_open_is_honest():
     assert "没开着" in r["message"]
 
 
+def test_no_logins_falls_back_to_default_identity(monkeypatch):
+    """全新用户一个登录态都没有：不报错，用 default 把登录窗口开起来。"""
+    import temu_bot.dianxiaomi.client as client_mod
+
+    class Cfg:
+        def logins(self):
+            return []
+
+    class Miss:
+        ok = False
+
+    monkeypatch.setattr(client_mod, "find_login_for_shop", lambda cfg, shop: Miss())
+
+    login, why = bl.pick_login_for_open(Cfg(), "A hat tshirt")
+    assert login == "default"
+    assert "还没有登录" in why
+
+
+def test_wait_for_shop_login_returns_when_shop_appears(monkeypatch):
+    import temu_bot.dianxiaomi.client as client_mod
+
+    class Hit:
+        ok = True
+
+    monkeypatch.setattr(client_mod, "clear_lookup_cache", lambda: None)
+    monkeypatch.setattr(client_mod, "find_login_for_shop", lambda cfg, shop: Hit())
+    monkeypatch.setattr(bl, "LOGIN_POLL_SECONDS", 0)
+
+    assert bl.wait_for_shop_login(object(), "A hat tshirt", "default", timeout_s=1) is True
+
+
+def test_wait_for_shop_login_stops_when_window_closes(monkeypatch):
+    """用户没登好就把窗口关了 → 不能傻等到 10 分钟。"""
+    import temu_bot.dianxiaomi.client as client_mod
+
+    class Miss:
+        ok = False
+
+    monkeypatch.setattr(client_mod, "clear_lookup_cache", lambda: None)
+    monkeypatch.setattr(client_mod, "find_login_for_shop", lambda cfg, shop: Miss())
+    monkeypatch.setattr(bl, "LOGIN_POLL_SECONDS", 0)
+
+    proc = FakeProc(alive=False)
+    assert (
+        bl.wait_for_shop_login(
+            object(), "A hat tshirt", "default", timeout_s=10, process=proc
+        )
+        is False
+    )
+
+
+def test_open_for_shop_waits_for_login(monkeypatch):
+    monkeypatch.setattr(bl, "pick_login_for_open", lambda cfg, shop: ("default", "why"))
+    monkeypatch.setattr(bl, "_session_exists", lambda cfg, login: False)
+    monkeypatch.setattr(
+        bl,
+        "open_site",
+        lambda login, **kw: {"login": login, "running": True, "message": "opened"},
+    )
+    monkeypatch.setattr(bl, "wait_for_shop_login", lambda *a, **kw: True)
+
+    r = bl.open_for_shop(object(), "A hat tshirt", wait=True, wait_minutes=1)
+    assert r["logged_in"] is True
+    assert "登录成功" in r["message"]
+
+
+def test_open_for_shop_cancels_and_closes_on_timeout(monkeypatch):
+    """等满 10 分钟还没登录好 → 取消上架，并把登录窗口关掉。"""
+    closed: list[str] = []
+    monkeypatch.setattr(bl, "pick_login_for_open", lambda cfg, shop: ("default", "why"))
+    monkeypatch.setattr(bl, "_session_exists", lambda cfg, login: False)
+    monkeypatch.setattr(
+        bl,
+        "open_site",
+        lambda login, **kw: {"login": login, "running": True, "message": "opened"},
+    )
+    monkeypatch.setattr(bl, "wait_for_shop_login", lambda *a, **kw: False)
+    monkeypatch.setattr(bl, "close", lambda login: closed.append(login) or {"ok": True})
+
+    r = bl.open_for_shop(object(), "A hat tshirt", wait=True, wait_minutes=10)
+    assert r["logged_in"] is False
+    assert "已取消上架" in r["message"]
+    assert closed == ["default"], "超时后要把登录窗口关掉"
+
+
+def test_open_for_shop_wait_tolerates_an_already_open_window(monkeypatch):
+    """上一次的登录窗口还开着 → 不报 409，继续等它登录完成。"""
+    monkeypatch.setattr(bl, "pick_login_for_open", lambda cfg, shop: ("default", "why"))
+    monkeypatch.setattr(bl, "_session_exists", lambda cfg, login: False)
+
+    def boom(login, **kw):
+        raise bl.AlreadyOpen("已经开着")
+
+    monkeypatch.setattr(bl, "open_site", boom)
+    monkeypatch.setattr(bl, "wait_for_shop_login", lambda *a, **kw: True)
+
+    r = bl.open_for_shop(object(), "A hat tshirt", wait=True, wait_minutes=1)
+    assert r["logged_in"] is True
+
+
 def test_cli_command_prefers_the_installed_entry(monkeypatch, tmp_path):
     """源码跑的时候优先用 .venv\\Scripts\\temu-bot.exe；没有就退回 python -m。"""
     import sys

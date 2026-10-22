@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import copy
+import logging
 import os
 import sys
 from dataclasses import dataclass, field
@@ -17,6 +18,8 @@ from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, Field
+
+log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------- 模型
 
@@ -49,9 +52,12 @@ class ProjectCfg(BaseModel):
 
 
 class ToolboxCfg(BaseModel):
-    app_dir: Path
+    # 旧桌面工具箱**不再是必需项**：图片批处理已经原生内置。
+    # 这两个路径只在"想合并旧台账 / 用 bridge 跑旧 Core.ps1"时才需要，
+    # 所以给个不存在的默认值即可，配置里可以整块省略。
+    app_dir: Path = Path("__legacy_toolbox__")
     core: str = "Core.ps1"
-    ledger: Path
+    ledger: Path = Path("__legacy_used_ids__.txt")
     powershell: str = "powershell.exe"
     node: str = "node"
 
@@ -174,7 +180,7 @@ class RuntimeCfg(BaseModel):
 
 class Config(BaseModel):
     project: ProjectCfg
-    toolbox: ToolboxCfg
+    toolbox: ToolboxCfg = Field(default_factory=ToolboxCfg)
     sheet: SheetCfg = Field(default_factory=SheetCfg)
     browser: BrowserCfg = Field(default_factory=BrowserCfg)
     shops: list[ShopCfg] = Field(default_factory=list)
@@ -194,8 +200,15 @@ class Config(BaseModel):
 
     @property
     def toolbox_seed_ledgers(self) -> list[Path]:
-        """要合并进来的旧台账。桌面工具箱那份就是靠这个带过来的（存在才读）。"""
-        return [self.toolbox.ledger]
+        """要合并进来的旧台账。桌面工具箱那份就是靠这个带过来的（存在才读）。
+
+        不存在 / 是个目录（默认占位值）时直接跳过，不能拿目录去读台账。
+        """
+        ledger = self.toolbox.ledger
+        try:
+            return [ledger] if ledger.is_file() else []
+        except OSError:
+            return []
 
     # ------------------------------------------------------------ 查询辅助
     def shop(self, name: str) -> ShopCfg | None:
@@ -374,6 +387,56 @@ def config_paths(root: Path | None = None) -> tuple[Path, Path]:
     return main, local
 
 
+TABLE_FILE_NAME = "商品信息表.xlsx"
+
+
+def autodetect_table(root: Path, home: Path | None = None) -> Path | None:
+    """配置里的商品表不存在时，在常见位置找一张 `商品信息表.xlsx`。
+
+    找这些地方（只读，不写配置）：
+      1. 程序目录、程序目录的上一级
+      2. 桌面本身
+      3. 桌面下一层文件夹（很多用户会把素材和表放在 `桌面\\黑色素材\\` 里）
+
+    多个候选时取**修改时间最新**的那个。找到后只在内存里用，控制台会显示
+    这个路径；用户点「保存设置」才会真正写进 config.local.yaml。
+    """
+    home = home or Path.home()
+    candidates: list[Path] = [
+        root / TABLE_FILE_NAME,
+        root.parent / TABLE_FILE_NAME,
+    ]
+    desktops = [
+        home / "Desktop",
+        home / "OneDrive" / "Desktop",
+        home / "OneDrive" / "桌面",
+    ]
+    for desktop in desktops:
+        if not desktop.is_dir():
+            continue
+        candidates.append(desktop / TABLE_FILE_NAME)
+        try:
+            for sub in desktop.iterdir():
+                if sub.is_dir():
+                    candidates.append(sub / TABLE_FILE_NAME)
+        except OSError:
+            continue
+
+    found: dict[str, Path] = {}
+    for path in candidates:
+        try:
+            if path.is_file():
+                found[str(path.resolve()).lower()] = path
+        except OSError:
+            continue
+    if not found:
+        return None
+    try:
+        return max(found.values(), key=lambda p: p.stat().st_mtime)
+    except OSError:
+        return next(iter(found.values()))
+
+
 def load_config(path: Path | None = None, *, require: bool = True) -> Config:
     root = project_root()
     main, local = config_paths(root)
@@ -385,12 +448,23 @@ def load_config(path: Path | None = None, *, require: bool = True) -> Config:
         raise ConfigError(f"找不到主配置: {main}")
 
     merged = _read_yaml(main)
-    merged = _deep_merge(merged, _read_yaml(local))
+    local_data = _read_yaml(local)
+    merged = _deep_merge(merged, local_data)
 
     cfg = Config(**merged)
     cfg.root = root
     cfg.data_dir = root / "data"
     cfg.work_dir = root / "work"
+
+    # 全新机器/新用户：配置里的表路径往往还是主配置里的占位值。
+    # 自动在桌面附近找一张；但 **local 里明确写过 project.table 就不猜**——
+    # 那是用户自己选的路径，找不到应该如实报错，不能悄悄换成别的表。
+    explicit_table = bool((local_data.get("project") or {}).get("table"))
+    if not explicit_table and not cfg.project.table.is_file():
+        found = autodetect_table(root)
+        if found is not None:
+            log.info("配置里的商品表不存在，自动找到：%s", found)
+            cfg.project.table = found
     return cfg
 
 

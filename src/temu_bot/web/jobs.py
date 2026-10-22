@@ -19,7 +19,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 from temu_bot.config import Config
-from temu_bot.listing import ListingOutcome, ListingPipeline, StepResult
+from temu_bot.dianxiaomi.client import OP_PUBLISH, DxmClient, DxmError
+from temu_bot.listing import ListingOutcome, ListingPipeline, Status, StepResult
 from temu_bot.sheet.schema import SheetRow
 from temu_bot.sheet.table import SheetTable
 
@@ -177,6 +178,12 @@ class JobRunner:
             log.exception("任务失败")
             return
 
+        try:
+            self._verify_pending(cfg, request, rows)
+        except Exception:  # noqa: BLE001
+            # 复核只是"把表格写得更准"，它自己挂了不能把整批结果带崩
+            log.exception("批次结束复核发布状态失败（不影响已提交的商品）")
+
         self._write_site_change_report(cfg, request)
         self.state = JobState.CANCELLED if self._cancel.is_set() else JobState.DONE
         self.current_row = None
@@ -278,6 +285,107 @@ class JobRunner:
         if request.clean_images and request.live and not outcome.failed:
             self._clean(cfg, row, outcome, op=request.op)
 
+    def _verify_pending(
+        self, cfg: Config, request: RunRequest, rows: list[SheetRow]
+    ) -> None:
+        """批次结束后再读一次「处理中」的商品，把最终结果落回表格。
+
+        为什么不在每行提交后一直等：Temu 发布可能要几分钟，逐行死等会把整批拖死。
+        这里只做一次轻量复核——整批跑完时，先跑的行已经过去几分钟，足够定论了；
+        还没定论的继续留「处理中」，不会假成功。
+        """
+        if not (request.live and request.op == OP_PUBLISH):
+            return
+        # 注入了假流水线（测试）时不做复核，避免碰真接口
+        if self._pipeline_factory is not None:
+            return
+
+        pending = [
+            r
+            for r in self.results
+            if r.outcome is not None
+            and not r.outcome.failed
+            and r.outcome.publish_state == "waiting"
+            and r.outcome.product_id
+        ]
+        if not pending:
+            return
+
+        from temu_bot.sheet.writeback import statuses_of, updates_for, write_back
+
+        rows_by_index = {row.row_index: row for row in rows}
+        clients: dict[str, DxmClient | None] = {}
+        try:
+            for result in pending:
+                outcome = result.outcome
+                assert outcome is not None
+                login = outcome.login or request.shop
+                if login not in clients:
+                    try:
+                        clients[login] = DxmClient(cfg, login) if login else None
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning("复核发布状态：建客户端失败（%s）：%s", login, exc)
+                        clients[login] = None
+                client = clients[login]
+                if client is None:
+                    continue
+
+                try:
+                    response = client.product_edit(outcome.product_id)
+                except DxmError as exc:
+                    log.warning("复核第 %s 行发布状态失败：%s", result.row_index, exc)
+                    continue
+
+                product = (response.get("data") or {}).get("product") or {}
+                state = str(product.get("dxmState") or "")
+                offline_state = str(product.get("dxmOfflineState") or "")
+                err = str(product.get("errMsg") or "").strip()
+
+                if offline_state == "publishFail" or err:
+                    reason = err or "店小秘标记为发布失败（publishFail）"
+                    step = StepResult(
+                        "VERIFY",
+                        Status.FAIL,
+                        f"批次结束复核：发布失败：{reason}",
+                        data={"state": state, "offline_state": offline_state, "error": err},
+                    )
+                    outcome.publish_state = "failed"
+                elif state == "online":
+                    step = StepResult(
+                        "VERIFY",
+                        Status.OK,
+                        "批次结束复核：已发布上线",
+                        data={"state": state, "offline_state": offline_state},
+                    )
+                    outcome.publish_state = "online"
+                else:
+                    continue
+
+                outcome.steps.append(step)
+                self._record_step(result.row_index, step)
+
+                row = rows_by_index.get(result.row_index)
+                if row is None:
+                    continue
+                update = updates_for(
+                    row,
+                    product_id=outcome.product_id,
+                    failed=outcome.failed,
+                    steps=outcome.steps,
+                    statuses=statuses_of(cfg),
+                )
+                report = write_back(cfg, update, backup_first=False)
+                if not report.ok:
+                    log.warning(
+                        "复核后的状态没写回第 %s 行：%s", result.row_index, report.message
+                    )
+                else:
+                    log.info("复核第 %s 行：%s", result.row_index, report.message)
+        finally:
+            for client in clients.values():
+                if client is not None:
+                    client.close()
+
     def _site_changed_rows(self) -> list[int]:
         """哪些行踩到了「疑似接口变更」（SiteChanged）。"""
         rows: list[int] = []
@@ -351,6 +459,7 @@ class JobRunner:
                 "op": request.op,
                 "product_id": outcome.product_id,
                 "failed": outcome.failed,
+                "publish_state": outcome.publish_state,
                 "steps": [s.name for s in outcome.steps],
             }
             with path.open("a", encoding="utf-8") as fh:

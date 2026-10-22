@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -49,6 +50,14 @@ log = logging.getLogger(__name__)
 
 # 平台商品 ID 搜索（实测确认：searchType=3 就是按 SPU/平台商品ID 搜）
 SEARCH_BY_PLATFORM_ID = 3
+
+# 发布后回读：店小秘把商品推给 Temu 是异步的，保存接口返回 code=0 **不代表发布成功**。
+# 实测（2026-10-18）：84 个商品保存都成功，但店小秘推 Temu 时授权过期，全部变成
+# publishFail，而表格里写的是"成功"。所以 op=2 提交后隔一会儿读一次商品详情。
+# 第一次立即读，之后每隔 VERIFY_INTERVAL 秒读一次；还没定论的先记「处理中」，
+# 批次结束时会再复核一次（见 web/jobs.py 的 _verify_pending）。
+VERIFY_ATTEMPTS = 3
+VERIFY_INTERVAL = 1.5
 
 # op 的人话解释（日志/干跑输出里用）
 OP_LABELS: dict[int, str] = {
@@ -93,6 +102,8 @@ class ListingOutcome:
     uploaded_urls: list[str] = field(default_factory=list)
     # 实际用到的登录身份（删图片空间时要用同一个身份）
     login: str = ""
+    # op=2 时回读到的发布状态：""（没查）/ "online" / "waiting" / "failed"
+    publish_state: str = ""
 
     @property
     def failed(self) -> bool:
@@ -116,6 +127,7 @@ class ListingOutcome:
             "product_id": self.product_id,
             "failed": self.failed,
             "writeback_ok": self.writeback_ok,
+            "publish_state": self.publish_state,
             "uploaded_urls": list(self.uploaded_urls),
             "login": self.login,
             "steps": [
@@ -398,8 +410,8 @@ class ListingPipeline:
         self._add(
             "SHOP_CHECK",
             Status.OK,
-            f"表里「{self.row.shop}」↔ 登录身份「{self.login}」（{how}）↔ 账号里的店"
-            f"「{result.matched_name}」(shopId={shop_id})",
+            f"实时核对：表里「{self.row.shop}」↔ 登录身份「{self.login}」（{how}）的"
+            f"账号里实际有「{result.matched_name}」(shopId={shop_id})",
             shop_id=shop_id,
             expected=self.row.shop,
             login=self.login,
@@ -795,6 +807,75 @@ class ListingPipeline:
         self._add("APPLY", Status.OK, f"已提交：{detail}")
         return True
 
+    def step_verify_publish(self, product_id: str) -> None:
+        """op=2 提交后回读真实发布状态——**别把"保存成功"当成"发布成功"**。
+
+        店小秘保存接口返回 code=0 只代表商品存进了店小秘；它再异步推给 Temu，
+        那一步失败会写在商品详情的 `dxmOfflineState=publishFail` / `errMsg` 里
+        （实测：Temu 授权过期 → 84 个商品全部发布失败，表格却显示成功）。
+
+        回读不到（网络错）**不判失败**——商品已经提交了，不能因此说发布失败，
+        先记「处理中」，批次结束时会再复核。
+        """
+        assert self._client is not None
+        state = offline_state = ""
+        last_error = ""
+        for attempt in range(VERIFY_ATTEMPTS):
+            if attempt:
+                time.sleep(VERIFY_INTERVAL)
+            try:
+                response = self._client.product_edit(product_id)
+            except DxmError as exc:
+                last_error = f"回读失败：{exc}"
+                continue
+            product = (response.get("data") or {}).get("product") or {}
+            if not product:
+                last_error = "回读结果里没有商品对象"
+                continue
+            state = str(product.get("dxmState") or "")
+            offline_state = str(product.get("dxmOfflineState") or "")
+            err = str(product.get("errMsg") or "").strip()
+
+            # 店小秘明确说发布失败了 → 这一行就是失败，表格要写「失败」+ 原因
+            if offline_state == "publishFail" or err:
+                reason = err or "店小秘标记为发布失败（publishFail）"
+                self.outcome.publish_state = "failed"
+                self._add(
+                    "VERIFY",
+                    Status.FAIL,
+                    f"发布失败：{reason}",
+                    state=state,
+                    offline_state=offline_state,
+                    error=err,
+                )
+                return
+            if state == "online":
+                self.outcome.publish_state = "online"
+                self._add(
+                    "VERIFY",
+                    Status.OK,
+                    "已发布上线（dxmState=online）",
+                    state=state,
+                    offline_state=offline_state,
+                )
+                return
+            # 还在 waitPublish 之类 → 再等一会儿；暂时不下结论
+
+        self.outcome.publish_state = "waiting"
+        current = (
+            f"当前 {state or '?'}/{offline_state or '?'}"
+            if state or offline_state
+            else (last_error or "读不到状态")
+        )
+        self._add(
+            "VERIFY",
+            Status.OK,
+            f"已提交，{current}；店小秘还在处理，表格先记「处理中」",
+            state=state,
+            offline_state=offline_state,
+            error=last_error,
+        )
+
     def step_apply_preview(self) -> bool:
         """干跑专用：拿模板商品当样本（**只读**），把"会改什么"提前算出来给你看。"""
         assert self._client is not None
@@ -898,12 +979,16 @@ class ListingPipeline:
         row = self.row
         # 表里本来就有商品ID 的行（重试/续跑），这次没拿到新ID 就别去动它
         product_id = self.outcome.product_id or row.product_id
+        # op=2 提交了但还没等到最终结果 → 写「处理中」，**不写成功**。
+        # 批次结束时会再复核一次；确认上线才改成成功，publishFail 改成失败。
+        status_key = "processing" if self.outcome.publish_state == "waiting" else None
         update = updates_for(
             row,
             product_id=product_id,
             failed=self.outcome.failed,
             steps=self.outcome.steps,
             statuses=statuses_of(self.cfg),
+            status_key=status_key,
         )
 
         if self.on_writeback is not None:
@@ -970,7 +1055,10 @@ class ListingPipeline:
             # 先换图再保存：保存下去的才是这一行的图，而不是模板的图
             if not self.step_upload_images():
                 return
-            self.step_apply_fields(product_id)
+            if self.step_apply_fields(product_id):
+                # 只有"立即发布"才需要回读；op=1/3 本来就该停在待发布。
+                if self.live and self.op == OP_PUBLISH:
+                    self.step_verify_publish(product_id)
         elif not self.live:
             # 干跑：没真复制出商品，也要把"会传哪几张图"列出来，
             # 不然用户看不到最要紧的那一步

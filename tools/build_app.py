@@ -76,8 +76,11 @@ README = """temu-bot —— 绿色免安装版
 首次使用
 --------
 1. 装 Google Chrome（登录店小秘要用系统 Chrome；装过了就跳过）。
-2. 双击「1-登录店小秘.bat」，在弹出的窗口里登录一次。之后长期复用。
-3. 回到控制台，在「设置 -> 路径」里把「商品信息表」改成这台电脑上的表路径。
+2. 双击「启动 temu-bot.bat」，在控制台点「开始上架」。
+   没登录过会自动弹出登录窗口——在里面登录店小秘，登录成功后程序会自动继续。
+   之后长期复用，不用每次登录。
+   （要换账号/重新登录时，也可以单独双击「1-登录店小秘.bat」。）
+3. 在「设置 -> 路径」里把「商品信息表」改成这台电脑上的表路径。
 
 目录里都有什么
 --------------
@@ -267,11 +270,11 @@ def main() -> int:
             "set PYTHONIOENCODING=utf-8\r\n"
             "echo.\r\n"
             "echo   登录店小秘：浏览器窗口里登录完，把窗口关掉就算完事。\r\n"
-            "echo   登录身份留空 = 按表格里的店铺名自动认。\r\n"
+            "echo   登录身份留空 = 用默认身份 default（控制台会按表里的店铺名自动认店）。\r\n"
             "echo.\r\n"
-            'set /p SHOP=登录身份（留空 = 自动认）: \r\n'
+            'set /p SHOP=登录身份（留空 = default）: \r\n'
             'if "%SHOP%"=="" (\r\n'
-            '  "%~dp0temu-bot.exe" login --until-closed\r\n'
+            '  "%~dp0temu-bot.exe" login --shop default --until-closed\r\n'
             ") else (\r\n"
             '  "%~dp0temu-bot.exe" login --shop "%SHOP%" --until-closed\r\n'
             ")\r\n"

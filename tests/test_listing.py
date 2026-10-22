@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import pytest
+from openpyxl import load_workbook
 
 from temu_bot.config import ShopCfg
 from temu_bot.dianxiaomi.client import ShopCheck
@@ -32,6 +33,7 @@ class FakeClient:
         save_code: int = 0,
         copy_adds: dict | None = None,
         template_product: dict | None = None,
+        product_after_save: dict | None = None,
     ) -> None:
         self.shops = shops if shops is not None else ["A hat tshirt"]
         # 真实商品列表里每行都带 shopId；FIND_TEMPLATE 会拿它复核"模板落在这家店"，
@@ -47,6 +49,8 @@ class FakeClient:
         self.copy_adds = copy_adds
         # 模板商品本身（读模板 id 时返回它）。不设就跟 product 一样。
         self.template_product = template_product
+        # 保存之后 product_edit 返回什么（模拟店小秘异步发布后的真实状态）
+        self.product_after_save = product_after_save
         self.calls: list[str] = []
         self.uploads: list[str] = []
         self.saved_product: dict | None = None
@@ -83,6 +87,8 @@ class FakeClient:
         template_id = str((self.template_row or {}).get("id") or "")
         if self.template_product is not None and template_id == str(product_id):
             return {"code": 0, "data": {"product": dict(self.template_product)}}
+        if self.product_after_save is not None and self.saved_product is not None:
+            return {"code": 0, "data": {"product": dict(self.product_after_save)}}
         return {"code": 0, "data": {"product": dict(self.product)}}
 
     def copy_product(self, product_id, shop_ids):
@@ -770,3 +776,86 @@ def test_live_run_reports_missing_new_product(cfg_with_shop, row):
     find_step = by_name(outcome, "FIND_NEW")
     assert find_step.status is Status.FAIL
     assert "没找到新商品" in find_step.detail
+
+
+# ------------------------------------------------------ 发布后回读（防"假成功"）
+def _publish_client(row, after: dict) -> FakeClient:
+    """保存成功后 product_edit 返回 after 的假客户端。"""
+    return FakeClient(
+        template_row={"id": 111, "productName": "模板商品", "dxmState": "online"},
+        product=product_with_images(
+            productName=row.title_cn,
+            productNameI18n=json.dumps({"en": row.title_en}),
+        ),
+        product_after_save=after,
+    )
+
+
+def test_publish_verification_marks_publishfail_as_failed(cfg_with_shop, row, sandbox):
+    """店小秘保存成功 ≠ 发布成功：publishFail 必须写进表格，带失败原因。"""
+    row.product_id = "184807703165779045"
+    client = _publish_client(
+        row,
+        {
+            "dxmState": "offline",
+            "dxmOfflineState": "publishFail",
+            "errMsg": "图片上传失败: access_token is expired",
+        },
+    )
+    outcome = make_pipeline(cfg_with_shop, row, client, live=True, op=2).run()
+
+    assert outcome.failed
+    verify = by_name(outcome, "VERIFY")
+    assert verify.status is Status.FAIL
+    assert "access_token is expired" in verify.detail
+    assert outcome.publish_state == "failed"
+
+    ws = load_workbook(sandbox["table"]).active
+    assert ws.cell(row=2, column=14).value == "失败"
+    assert "VERIFY" in (ws.cell(row=2, column=16).value or "")
+
+
+def test_publish_verification_marks_waiting_as_processing(cfg_with_shop, row, sandbox):
+    """还没定论 → 写「处理中」，**不能先写成功**。"""
+    row.product_id = "184807703165779045"
+    client = _publish_client(row, {"dxmState": "offline", "dxmOfflineState": "waitPublish"})
+    outcome = make_pipeline(cfg_with_shop, row, client, live=True, op=2).run()
+
+    assert not outcome.failed
+    assert outcome.publish_state == "waiting"
+    assert by_name(outcome, "VERIFY").status is Status.OK
+
+    ws = load_workbook(sandbox["table"]).active
+    assert ws.cell(row=2, column=14).value == "处理中"
+    assert not ws.cell(row=2, column=16).value
+
+
+def test_publish_verification_marks_online_as_success(cfg_with_shop, row, sandbox):
+    row.product_id = "184807703165779045"
+    client = _publish_client(row, {"dxmState": "online"})
+    outcome = make_pipeline(cfg_with_shop, row, client, live=True, op=2).run()
+
+    assert not outcome.failed
+    assert outcome.publish_state == "online"
+    assert by_name(outcome, "VERIFY").status is Status.OK
+
+    ws = load_workbook(sandbox["table"]).active
+    assert ws.cell(row=2, column=14).value == "成功"
+
+
+def test_save_only_never_checks_publish_state(cfg_with_shop, row):
+    """op=1 本来就该停在待发布，别去读发布状态、更别因此判失败。"""
+    row.product_id = "184807703165779045"
+    client = _publish_client(
+        row,
+        {
+            "dxmState": "offline",
+            "dxmOfflineState": "publishFail",
+            "errMsg": "不该被读到",
+        },
+    )
+    outcome = make_pipeline(cfg_with_shop, row, client, live=True, op=1).run()
+
+    assert "VERIFY" not in step_names(outcome)
+    assert not outcome.failed
+    assert outcome.publish_state == ""

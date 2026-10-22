@@ -661,7 +661,7 @@ def test_toolbox_scan_writes_nothing(client, tool_dir):
 
 def test_toolbox_run_needs_an_explicit_confirm(client, tool_dir):
     """少了 live 就不许写 —— 跟收集/上架那边一个规矩。"""
-    for tool in ("rename", "export", "convert", "merge"):
+    for tool in ("rename", "export", "convert", "resize", "merge"):
         res = client.post(f"/api/toolbox/{tool}/run", json={"folder": str(tool_dir)})
         assert res.status_code == 400, tool
         assert "确认" in res.json()["error"]
@@ -703,6 +703,68 @@ def test_toolbox_convert_run_makes_the_new_format(client, tool_dir):
     assert data["ok"] is True, data
     assert (tool_dir / "裙子.webp").is_file()
     assert (tool_dir / "帽子.webp").is_file()
+
+
+def test_toolbox_resize_run_overwrites_in_place(client, tool_dir):
+    from PIL import Image
+
+    data = client.post(
+        "/api/toolbox/resize/run",
+        json={"folder": str(tool_dir), "live": True},
+    ).json()
+
+    assert data["ok"] is True, data
+    out = tool_dir / "裙子.jpg"
+    assert out.is_file(), "JPG 原图应该原地覆盖"
+    with Image.open(out) as im:
+        assert im.size == (1340, 1785)
+    assert (tool_dir / "帽子.jpg").is_file(), "PNG 应该转成同名 JPG"
+    assert not (tool_dir / "帽子.png").exists(), "原 PNG 应该被删掉"
+
+
+def test_toolbox_resize_scan_writes_nothing(client, tool_dir):
+    before = sorted(p.name for p in tool_dir.iterdir())
+    data = client.post(
+        "/api/toolbox/resize/scan",
+        json={"folder": str(tool_dir), "width": 800, "height": 800},
+    ).json()
+
+    assert data["counts"]["would"] == 2
+    assert sorted(p.name for p in tool_dir.iterdir()) == before
+    assert all(i["target"].endswith(".jpg") for i in data["items"])
+    assert all("_800x800" not in i["target"] for i in data["items"]), "默认保持原名"
+
+
+def test_toolbox_combo_scan_writes_nothing(client, tool_dir):
+    before = sorted(p.name for p in tool_dir.iterdir())
+    data = client.post("/api/toolbox/combo/scan", json={"folder": str(tool_dir)}).json()
+
+    assert data["items"], data
+    assert sorted(p.name for p in tool_dir.iterdir()) == before
+
+
+def test_toolbox_combo_start_runs_to_done(client, tool_dir):
+    import time
+
+    res = client.post("/api/toolbox/combo/start", json={"folder": str(tool_dir)})
+    assert res.status_code == 200, res.text
+
+    snap = res.json()
+    for _ in range(200):
+        if snap["state"] != "running":
+            break
+        time.sleep(0.05)
+        snap = client.get("/api/toolbox/combo/status").json()
+
+    assert snap["state"] == "done", snap
+    assert snap["percent"] == 100
+    assert snap["result"]["ok"] is True
+
+    names = sorted(p.name for p in tool_dir.iterdir())
+    ids = [n for n in names if n.endswith(".jpg") and n[:-4].isdigit() and len(n[:-4]) == 11]
+    assert len(ids) == 2, names
+    assert "图片文件名清单.csv" in names
+    assert "图片文件名清单.xlsx" in names
 
 
 def test_toolbox_merge_run_writes_the_merged_book(client, tool_dir):

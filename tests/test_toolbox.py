@@ -345,6 +345,39 @@ def test_existing_list_is_backed_up_not_overwritten(tmp_path: Path):
     assert any(i.action == "备份旧清单" for i in report.items)
 
 
+def test_export_csv_path_can_be_a_folder(tmp_path: Path):
+    """用户把文件夹填进「清单输出路径」→ 当成输出目录，绝不能把文件夹改名。"""
+    folder = tmp_path / "素材"
+    folder.mkdir()
+    make_image(folder / "12345678901-裙子.jpg")
+    out = tmp_path / "输出"
+    out.mkdir()
+
+    report = listing.run(folder, csv_path=out, fmt="both")
+
+    assert report.ok, report.summary()
+    assert (out / "图片文件名清单.csv").is_file()
+    assert (out / "图片文件名清单.xlsx").is_file()
+    assert folder.is_dir()
+    assert not list(tmp_path.glob("素材.bak-*"))
+
+
+def test_export_never_renames_a_directory_that_looks_like_a_file(tmp_path: Path):
+    """哪怕目标路径是个叫 *.csv 的文件夹，也只能报错跳过，不能 rename 它。"""
+    folder = tmp_path / "素材"
+    folder.mkdir()
+    make_image(folder / "12345678901-裙子.jpg")
+    fake = folder / "图片文件名清单.csv"
+    fake.mkdir()
+
+    report = listing.run(folder, fmt="csv")
+
+    assert not report.ok
+    assert any(i.status == FAILED for i in report.items)
+    assert fake.is_dir(), "文件夹必须原样不动"
+    assert not list(folder.glob("*.bak-*"))
+
+
 def test_export_plan_writes_nothing(tmp_path: Path):
     folder = tmp_path / "素材"
     folder.mkdir()

@@ -16,7 +16,7 @@ const MENU = [
   { key: 'autoMockup', label: '自动套图', ready: false },
   { key: 'psMockup', label: 'PS套图', ready: false },
   { key: 'collect', label: '收集文件', ready: true },
-  { key: 'toolbox', label: '图片批处理生成清单', ready: true, note: '11 位 ID - 导表 - 保留 11 位 ID' },
+  { key: 'toolbox', label: '图片批处理生成清单', ready: true, note: '尺寸与格式 · 11 位 ID' },
   { key: 'settings', label: '设置', ready: true },
 ];
 
@@ -695,10 +695,12 @@ function tableShops() {
   return [...new Set(selectedRows().map((r) => (r.shop || '').trim()).filter(Boolean))];
 }
 
-/** 打开店小秘：**按表格里的店铺名**自动决定开哪个账号的浏览器。 */
-async function openSiteForTable() {
+/** 打开店小秘：**按表格里的店铺名**自动决定开哪个账号的浏览器。
+ *  opts.wait = 没有登录态时，等用户登录完成再返回（控制台点一次「开始」就能走完）。 */
+async function openSiteForTable(opts = {}) {
   const shops = tableShops();
-  const q = `shop=${encodeURIComponent(shops[0] || '')}`;
+  let q = `shop=${encodeURIComponent(shops[0] || '')}`;
+  if (opts.wait) q += '&wait=1';
   return api(`/api/browser/open?${q}`, { method: 'POST' });
 }
 
@@ -799,21 +801,48 @@ async function start() {
   const rows = [...picked];
   if (!rows.length) { say($('runMsg'), '先在 ② 里勾选要跑的行', false); return; }
 
+  // ⓪ 全新用户还没有登录态：点一次「开始」就把登录窗口开起来，并等登录完成。
+  //    不需要先去双击 1-登录店小秘.bat，也不用记登录身份叫什么。
+  let openedForLogin = false;
+  if ($('openBeforeLive').checked) {
+    await refreshStatus();
+    const hasSession = (window.__logins || []).some((l) => l && l.has_session);
+    if (!hasSession) {
+      say($('runMsg'), '还没有登录过店小秘——正在打开登录窗口，登录完成后会自动继续…');
+      const o = await openSiteForTable({ wait: true });
+      say($('shopMsg'), o.message || o.error || '', !o.error && o.logged_in !== false);
+      if (o.error || o.logged_in === false) {
+        say($('runMsg'), '登录没有完成，已取消上架（一行都没有跑）。登录店小秘后再点开始。', false);
+        return;
+      }
+      openedForLogin = true;
+    }
+  }
+
   // ① 先核对店铺（只读）——对不上就停在这里，**一行都不跑**。
   //    这样 98 行不会各刷一条一模一样的 SHOP_CHECK 错误。
   say($('runMsg'), '先核对店铺…');
-  const chk = await checkShop(rows);
+  let chk = await checkShop(rows);
   if (!chk || !chk.ok) {
-    say($('runMsg'), '店铺核对没通过，已停止（没有执行上架）。先看上面「店铺核对」那一块。', false);
-    if ($('openBeforeLive').checked) {
-      // 顺手打开店小秘，好让你当场登录 / 切店
-      const o = await openSiteForTable();
-      say($('shopMsg'), o.message || o.error || '', !!o.ok);
+    // 也可能是登录到了别的账号 / 店不在这个账号里：开窗口等用户登录、切店，
+    // 成功后自动再核对一次，不用重新点开始。
+    if ($('openBeforeLive').checked && !openedForLogin) {
+      say($('runMsg'), '店铺还没对上——正在打开店小秘，登录/切店完成后会自动继续…');
+      const o = await openSiteForTable({ wait: true });
+      say($('shopMsg'), o.message || o.error || '', !o.error && o.logged_in !== false);
+      openedForLogin = true;
+      if (!o.error && o.logged_in !== false) {
+        chk = await checkShop(rows);
+      }
     }
-    return;
+    if (!chk || !chk.ok) {
+      say($('runMsg'), '店铺核对没通过，已停止（没有执行上架）。先看上面「店铺核对」那一块。', false);
+      return;
+    }
   }
 
-  const live = $('mode').value === 'live';
+  // 运行方式固定为真实执行（页面上不再显示这个选项）
+  const live = true;
   const chosen = selectedRows();
   const fresh = chosen.filter((r) => !r.product_id).length;
 
@@ -844,8 +873,8 @@ async function start() {
   }
 
   // 自动打开店小秘（可关）：你可以在窗口里自己再看一眼店铺/登录。
-  // 打不开不拦——真正的把关是上面那次核对。
-  if ($('openBeforeLive').checked) {
+  // 打不开不拦——真正的把关是上面那次核对。刚才为了登录已经开过就别再开一次。
+  if ($('openBeforeLive').checked && !openedForLogin) {
     say($('runMsg'), '正在打开店小秘…');
     const r = await openSiteForTable();
     say($('shopMsg'), r.message || r.error || '', !!r.ok);
@@ -925,7 +954,7 @@ async function loadSettings() {
     <div class="card">
       <h3>路径</h3>
       <div class="field"><label>商品信息表</label><input type="text" id="setTable" value="${esc(data.project.table)}"></div>
-      <div class="field"><label>旧工具箱目录</label><input type="text" id="setToolbox" value="${esc(data.toolbox.app_dir)}"></div>
+      <div class="kv">图片批处理是内置功能，不需要旧版桌面工具箱目录。</div>
     </div>
 
     <div class="card">
@@ -952,7 +981,6 @@ async function saveSettings() {
       viewport: { width: Number($('setVw').value), height: Number($('setVh').value) },
     },
     project: { table: $('setTable').value.trim() },
-    toolbox: { app_dir: $('setToolbox').value.trim() },
   };
   const r = await api('/api/config', {
     method: 'POST',
@@ -973,7 +1001,11 @@ function renderTopbar(s) {
   const box = $('topbar');
   if (!s) { box.innerHTML = ''; return; }
   const name = (s.table || '').split(/[\\/]/).pop() || '(未设)';
-  const rows = s.table_error ? '<span class="warn">表格读取失败</span>' : `${s.table_rows} 行`;
+  const err = s.table_error || '';
+  const tableMissing = err.includes('找不到商品表') || err.includes('找不到表格');
+  const rows = err
+    ? `<span class="warn" title="${esc(err)}">${tableMissing ? '未设置商品表' : '表格读取失败'}</span>`
+    : `${s.table_rows} 行`;
   box.innerHTML = `
     <span class="k">当前商品信息表</span>
     <span class="v" title="${esc(s.table || '')}">${esc(name)}</span>
@@ -1052,11 +1084,6 @@ function autofillSpu() {
   const cur = $('collectSpu').value.trim();
   const isOtherShopSpu = (window.__shops || []).some((x) => x.template_spuid && x.template_spuid === cur);
   if (!cur || isOtherShopSpu) $('collectSpu').value = shop.template_spuid || '';
-}
-
-function syncMode() {
-  const live = $('mode').value === 'live';
-  $('liveExtra').style.display = live ? '' : 'none';
 }
 
 /* ------------------------------------------------------------------ 收集文件 */
@@ -1305,32 +1332,29 @@ async function pickOutputNative() {
 }
 
 /* ------------------------------------------------------------------ 工具箱 */
-// 页面上就一件事：11 位 ID - 导表 - 保留 11 位 ID（后端的 roundtrip 模式）。
-// 骨架是"预览（只读）→ 清单 → 执行（要确认）"。逻辑全在后端。
-const TB_TOOLS = ['rename'];
-
+// 页面上就一件事：尺寸与格式 → 11 位 ID（一条龙）。
+// 骨架是"预览（只读）→ 执行（后台任务 + 进度条）"。逻辑全在后端。
 const TB_TITLE = {
-  rename: '11 位 ID - 导表 - 保留 11 位 ID',
+  combo: '尺寸与格式 + 11 位 ID',
 };
 
 function tbFolder() {
   return $('tbFolder').value.trim();
 }
 
-/** 执行按钮的文案（预览通过前一直是禁用的）。 */
-function tbRunLabel() {
-  return '执行';
-}
-
-function tbPayload(tool, live) {
-  const folder = tbFolder();
+function tbComboPayload() {
   const wantCsv = $('tbExportCsv').checked;
   const wantXlsx = $('tbExportXlsx').checked;
   // 两个都不勾 = ""，后端会明确报「请至少勾选一种输出格式」
   const fmt = wantCsv && wantXlsx ? 'both' : wantCsv ? 'csv' : wantXlsx ? 'xlsx' : '';
   return {
-    folder, live,
-    mode: 'roundtrip',
+    folder: tbFolder(),
+    width: Number($('tbWidth').value) || 1340,
+    height: Number($('tbHeight').value) || 1785,
+    target_format: $('tbFormat').value,
+    fit: $('tbFit').value,
+    // 页面上不显示质量，固定用默认值（命令行仍可 --quality 调）
+    quality: 95,
     id_length: Number($('tbRenameLen').value) || 11,
     csv_path: $('tbExportPath').value.trim(),
     export_format: fmt,
@@ -1381,53 +1405,104 @@ function renderToolReport(tool, data, elapsedMs) {
   return data.ok;
 }
 
-async function doToolbox(tool, live) {
-  const box = $(`tb${tool[0].toUpperCase()}${tool.slice(1)}Box`);
-  const msg = $(`tb${tool[0].toUpperCase()}${tool.slice(1)}Msg`);
-  const scanBtn = $(`tb${tool[0].toUpperCase()}${tool.slice(1)}Scan`);
-  const runBtn = $(`tb${tool[0].toUpperCase()}${tool.slice(1)}Run`);
+let comboPoll = null;
 
+async function doComboScan() {
+  const msg = $('tbComboMsg');
+  const scanBtn = $('tbComboScan');
+  const runBtn = $('tbComboRun');
   if (!tbFolder()) { say(msg, '先在 ① 里选文件夹', false); return; }
-  say(msg, '');
-  if (!live) runBtn.disabled = true;
+  const p = tbComboPayload();
+  if (!p.export_format) { say(msg, '至少勾选一种清单格式（CSV 或 XLSX）', false); return; }
 
-  if (live) {
-    const ok = confirm(
-      `${tbRunLabel(tool)}\n\n` +
-      `文件夹：${tbFolder()}\n` +
-      `${TB_NOTES[tool]}\n\n` +
-      `确定要执行吗？（执行前建议先点过「预览」）`
-    );
-    if (!ok) return;
-  }
-
-  const { result: data, ms } = await withBusy(live ? runBtn : scanBtn, live ? '执行中…' : '预览中…', () =>
-    api(`/api/toolbox/${tool}/${live ? 'run' : 'scan'}`, {
+  say(msg, '正在预览（图片多时需要一会儿）…');
+  $('tbComboBar').style.width = '0%';
+  runBtn.disabled = true;
+  const { result: data, ms } = await withBusy(scanBtn, '预览中…', () =>
+    api('/api/toolbox/combo/scan', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(tbPayload(tool, live)),
+      body: JSON.stringify(p),
     })
   );
-
   if (data.error) { say(msg, data.error, false); return; }
-  const ok = renderToolReport(tool, data, ms);
-  if (live) {
-    say(msg, data.summary || '已完成', ok);
-  } else {
-    // 预览过之后才允许执行
-    runBtn.disabled = false;
-    const failed = (data.counts || {}).failed || 0;
-    say(msg, failed ? `有 ${failed} 项会失败` : '预览完成', failed ? false : undefined);
+  renderToolReport('combo', data, ms);
+  runBtn.disabled = false;
+  const failed = (data.counts || {}).failed || 0;
+  say(msg, failed ? `有 ${failed} 项会失败` : '预览完成（还没有动文件）', failed ? false : undefined);
+}
+
+async function doComboRun() {
+  const msg = $('tbComboMsg');
+  const runBtn = $('tbComboRun');
+  if (!tbFolder()) { say(msg, '先在 ① 里选文件夹', false); return; }
+  const p = tbComboPayload();
+  if (!p.export_format) { say(msg, '至少勾选一种清单格式（CSV 或 XLSX）', false); return; }
+
+  const fitLabel = $('tbFit').selectedOptions[0]?.textContent || p.fit;
+  const fmt = (p.target_format || 'jpg').toUpperCase();
+  const ok = confirm(
+    `一条龙执行\n\n` +
+    `文件夹：${p.folder}\n` +
+    `① 尺寸与格式：${p.width} × ${p.height} · ${fmt}（${fitLabel}）\n` +
+    `   ⚠ 会直接覆盖原图，文件名不变；png 等原文件会被删掉。\n` +
+    `② 11 位 ID：加 ID → 导出清单 → 还原成纯 11 位 ID。\n\n` +
+    `确定开始吗？（建议先点「预览」）`
+  );
+  if (!ok) return;
+
+  say(msg, '正在启动…');
+  $('tbComboBar').style.width = '0%';
+  const start = await withBusy(runBtn, '启动中…', () =>
+    api('/api/toolbox/combo/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(p),
+    })
+  );
+  if (start.error) { say(msg, start.error, false); return; }
+  runBtn.disabled = true;
+  say(msg, '开始处理…');
+  if (comboPoll) clearInterval(comboPoll);
+  comboPoll = setInterval(pollCombo, 500);
+  pollCombo();
+}
+
+async function pollCombo() {
+  const s = await api('/api/toolbox/combo/status');
+  if (s.error) return;
+  $('tbComboBar').style.width = `${s.percent || 0}%`;
+  if (s.state === 'running') {
+    say($('tbComboMsg'), s.message || '处理中…');
+    return;
+  }
+  if (comboPoll) { clearInterval(comboPoll); comboPoll = null; }
+  const runBtn = $('tbComboRun');
+  if (runBtn) runBtn.disabled = false;
+  if (s.state === 'failed') {
+    say($('tbComboMsg'), s.error || '处理失败', false);
+    return;
+  }
+  if (s.state === 'done' && s.result) {
+    const ok = renderToolReport('combo', s.result, 0);
+    say($('tbComboMsg'), s.result.summary || '已完成', ok);
   }
 }
 
-/** 执行前的确认框里写清楚这一步到底会动什么。 */
-const TB_NOTES = {
-  rename:
-    '会给文件发新的 11 位唯一 ID 并改名（台账保证不重发），' +
-    '导出「ID ↔ 原名」的清单，然后把文件名还原成纯 11 位 ID。\n' +
-    '清单同名文件先备份成 .bak-时间戳，不会覆盖。',
-};
+/** 「常用规格」下拉 → 回填宽高/格式；选手动改了尺寸就自动切到「自定义」。 */
+function tbApplySizePreset() {
+  const value = $('tbSizePreset').value;
+  if (value === 'custom') return;
+  const [size, fmt] = value.split(':');
+  const [w, h] = size.split('x');
+  $('tbWidth').value = w;
+  $('tbHeight').value = h;
+  $('tbFormat').value = fmt;
+}
+
+function tbMarkSizeCustom() {
+  $('tbSizePreset').value = 'custom';
+}
 
 async function doToolboxProbe() {
   const box = $('tbProbeBox');
@@ -1469,13 +1544,12 @@ async function pickToolboxFolder() {
 
 /** 换了文件夹 → 之前的预览作废，执行按钮重新锁上。 */
 function resetToolboxButtons() {
-  for (const tool of TB_TOOLS) {
-    const cap = tool[0].toUpperCase() + tool.slice(1);
-    const btn = $(`tb${cap}Run`);
-    if (btn) btn.disabled = true;
-    const count = $(`tb${cap}Count`);
-    if (count) count.textContent = '';
-  }
+  const runBtn = $('tbComboRun');
+  if (runBtn) runBtn.disabled = true;
+  const count = $('tbComboCount');
+  if (count) count.textContent = '';
+  const bar = $('tbComboBar');
+  if (bar) bar.style.width = '0%';
 }
 
 function wire() {
@@ -1490,13 +1564,14 @@ function wire() {
   $('collectSpu').onchange = saveCollectLast;
   $('collectSpu').oninput = saveCollectLast;
 
-  // 工具箱：四个工具一对按钮 + 文件夹选择 + 自检
+  // 工具箱：尺寸与格式 + 11 位 ID（一条龙） + 文件夹选择 + 自检
   $('tbPickFolder').onclick = pickToolboxFolder;
-  for (const tool of TB_TOOLS) {
-    const cap = tool[0].toUpperCase() + tool.slice(1);
-    $(`tb${cap}Scan`).onclick = () => doToolbox(tool, false);
-    $(`tb${cap}Run`).onclick = () => doToolbox(tool, true);
-  }
+  $('tbComboScan').onclick = doComboScan;
+  $('tbComboRun').onclick = doComboRun;
+  $('tbSizePreset').onchange = tbApplySizePreset;
+  $('tbWidth').oninput = tbMarkSizeCustom;
+  $('tbHeight').oninput = tbMarkSizeCustom;
+  $('tbFormat').onchange = tbMarkSizeCustom;
   $('tbProbe').onclick = doToolboxProbe;
 
   $('pickAll').onclick = () => {
@@ -1531,7 +1606,6 @@ function wire() {
   $('start').onclick = start;
   $('stop').onclick = stop;
   $('saveSettings').onclick = saveSettings;
-  $('mode').onchange = syncMode;
   $('logLevel').onchange = renderLogs;
   $('logFollow').onchange = renderLogs;
   $('logClear').onclick = () => { logEntries = []; renderLogs(); };
@@ -1548,7 +1622,6 @@ async function boot() {
   renderMenu();
   wire();
   showPage('run');
-  syncMode();
   startLogStream();
   await refreshStatus();
   await refreshRows();

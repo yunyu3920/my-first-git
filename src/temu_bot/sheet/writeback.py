@@ -46,6 +46,7 @@ def statuses_of(cfg: Config | None, sheet: SheetCfg | None = None) -> dict[str, 
     configured = dict(table.statuses) if table is not None else {}
     return {
         "success": configured.get("success", "成功"),
+        "processing": configured.get("processing", "处理中"),
         "failed": configured.get("failed", "失败"),
         "need_human": configured.get("need_human", "需人工"),
     }
@@ -73,14 +74,22 @@ def updates_for(
     failed: bool,
     steps: list,
     statuses: dict[str, str],
+    status_key: str | None = None,
 ) -> CellUpdate:
     """算出这一行该写哪几个格子（**纯函数**，不碰磁盘）。
 
     - 有商品ID 才写第 13 列——没有就留空，绝不拿别的东西顶上；
-    - 状态按成功/失败写第 14 列；
-    - 问题项第 16 列：失败时写第一条失败原因，成功时**清空**（旧的失败痕迹要抹掉）。
+    - 状态按成功/失败写第 14 列；`status_key="processing"` 时写「处理中」
+      （op=2 提交后还没等到店小秘的最终结果，**不能先写成功**）；
+    - 问题项第 16 列：失败时写第一条失败原因，否则**清空**（旧的失败痕迹要抹掉）。
     """
-    fields: dict[int, object] = {COL_STATUS: statuses["failed"] if failed else statuses["success"]}
+    if failed:
+        status = statuses["failed"]
+    elif status_key:
+        status = statuses.get(status_key, statuses["success"])
+    else:
+        status = statuses["success"]
+    fields: dict[int, object] = {COL_STATUS: status}
     if product_id:
         fields[COL_PRODUCT_ID] = product_id
     fields[COL_PROBLEM] = first_problem(failed, steps)

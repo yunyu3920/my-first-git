@@ -13,6 +13,14 @@ from temu_bot.sheet.schema import EXPECTED_HEADER
 HEADER_ROW = [EXPECTED_HEADER[i] for i in sorted(EXPECTED_HEADER)]
 
 
+@pytest.fixture(autouse=True)
+def _no_publish_verify_sleep(monkeypatch):
+    """发布后回读的等待时间在测试里设为 0——别让测试真的睡几分钟。"""
+    from temu_bot import listing
+
+    monkeypatch.setattr(listing, "VERIFY_INTERVAL", 0)
+
+
 def make_table(path: Path, rows: list[dict[int, object]]) -> Path:
     wb = openpyxl.Workbook()
     ws = wb.active

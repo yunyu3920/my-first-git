@@ -31,7 +31,8 @@ def make_cfg(tmp_path: Path, shops: list[ShopCfg] | None = None) -> Config:
 
 
 @pytest.fixture(autouse=True)
-def _fresh_cache():
+def _clean_state():
+    # 现在没有缓存了；保留 clear 调用验证它仍是安全的空操作
     clear_lookup_cache()
     yield
     clear_lookup_cache()
@@ -124,8 +125,8 @@ def test_a_broken_identity_does_not_kill_the_search(tmp_path):
     assert any(s["login"] == "broken" and "接口" in s["reason"] for s in lookup.scanned)
 
 
-def test_result_is_cached_briefly(tmp_path):
-    """一批几十行、店铺名往往一样，不必每行都去问一遍接口。"""
+def test_each_lookup_queries_the_live_shop_list(tmp_path):
+    """用户 2026-10-22：不能程序自己记结果，每一行都要实时问账号里的店铺。"""
     cfg = make_cfg(tmp_path)
     calls: list[str] = []
 
@@ -136,7 +137,7 @@ def test_result_is_cached_briefly(tmp_path):
     for _ in range(5):
         find_login_for_shop(cfg, "A hat tshirt", candidates=["a"], client_factory=factory)
 
-    assert calls == ["a"], f"应该只问一次，实际问了 {len(calls)} 次"
+    assert calls == ["a"] * 5, f"应该每行都问一次，实际问了 {len(calls)} 次"
 
 
 def test_candidates_default_to_logins_with_a_session(tmp_path):

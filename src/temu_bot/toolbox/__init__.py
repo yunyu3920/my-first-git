@@ -5,6 +5,8 @@
 | `rename`  | SKU 重命名 —— 11 位唯一 ID，4 种模式 |
 | `listing` | 导出图片清单 —— CSV（GBK，逐字节兼容老格式）+ XLSX |
 | `convert` | 格式转换 —— png / jpg / webp / avif（Pillow，不需要 Node） |
+| `resize`  | 尺寸与格式 —— 统一改成指定宽高 + jpg/png/webp（默认 1340×1785 / JPG，覆盖原图） |
+| `combo`   | 一条龙 —— 先尺寸与格式，再 11 位 ID + 导清单 + 还原 |
 | `merge`   | Excel 合并 —— 目录里所有工作簿纵向拼成一个 |
 | `ids`     | 11 位 ID 台账（并进项目了，不再依赖桌面那个文件夹） |
 | `bridge`  | 旧路子：子进程调桌面工具的 Core.ps1。**只剩 doctor 自检在用它** |
@@ -15,7 +17,7 @@
 from __future__ import annotations
 
 from temu_bot.config import Config
-from temu_bot.toolbox import convert, ids, listing, merge, rename
+from temu_bot.toolbox import combo, convert, ids, listing, merge, rename, resize
 from temu_bot.toolbox.bridge import ToolboxError, probe, run_ps
 from temu_bot.toolbox.result import (
     FAILED,
@@ -36,12 +38,14 @@ __all__ = [
     "ToolItem",
     "ToolReport",
     "ToolboxError",
+    "combo",
     "convert",
     "ids",
     "listing",
     "merge",
     "probe",
     "rename",
+    "resize",
     "run_ps",
     "selfcheck",
 ]

@@ -13,7 +13,7 @@ import asyncio
 import json
 import logging
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -34,6 +34,7 @@ from temu_bot.web.configio import (
     list_dir,
     write_local_config,
 )
+from temu_bot.web.combo_jobs import ComboBusy, ComboRequest, ComboRunner
 from temu_bot.web.jobs import BusyError, JobRunner, RunRequest
 from temu_bot.web.logs import LogBuffer
 from temu_bot.web.shopcheck import precheck_shops
@@ -99,6 +100,7 @@ class AppState:
     cfg: Config
     logs: LogBuffer
     runner: JobRunner
+    combo: ComboRunner = field(default_factory=ComboRunner)
 
 
 # ------------------------------------------------------------------ 日志流
@@ -226,6 +228,32 @@ class ToolboxConvertPayload(ToolboxFolderPayload):
     overwrite: bool = False
 
 
+class ToolboxResizePayload(ToolboxFolderPayload):
+    width: int = 1340
+    height: int = 1785
+    target_format: str = "jpg"
+    fit: str = "cover"
+    quality: int = 95
+    output_dir: str = ""
+    recursive: bool = False
+    overwrite: bool = False
+    # True（默认）= 覆盖原图、保持文件名；False = 另存 `<原名>_宽x高`
+    inplace: bool = True
+
+
+class ToolboxComboPayload(ToolboxFolderPayload):
+    """尺寸与格式 → 11 位 ID 一条龙。"""
+
+    width: int = 1340
+    height: int = 1785
+    target_format: str = "jpg"
+    fit: str = "cover"
+    quality: int = 95
+    id_length: int = 11
+    csv_path: str = ""
+    export_format: str = "both"
+
+
 class ToolboxMergePayload(ToolboxFolderPayload):
     output_file: str = ""
     add_source_row: bool = False
@@ -250,7 +278,7 @@ def build_state(cfg: Config | None = None, *, runner: JobRunner | None = None) -
 
     logs = LogBuffer()
     logs.attach()
-    return AppState(cfg=cfg, logs=logs, runner=runner or JobRunner())
+    return AppState(cfg=cfg, logs=logs, runner=runner or JobRunner(), combo=ComboRunner())
 
 
 def create_app(cfg: Config | None = None, *, state: AppState | None = None) -> FastAPI:
@@ -620,6 +648,8 @@ def create_app(cfg: Config | None = None, *, state: AppState | None = None) -> F
         shop: str = Query("", description="表格里的店铺名；用它自动决定开哪个身份的浏览器"),
         login: str = Query("", description="也可以直接指定登录身份（不传就按 shop 自动认）"),
         url: str = Query("", description="起始地址；不传就用默认的店小秘入口"),
+        wait: bool = Query(False, description="没有登录态时，等用户登录完成再返回"),
+        wait_minutes: int = Query(10, ge=1, le=10, description="wait=1 时最多等多少分钟（上限 10）"),
     ) -> JSONResponse:
         """打开浏览器逛店小秘，好让你确认店铺 / 登录 / 切换店铺。
 
@@ -633,7 +663,15 @@ def create_app(cfg: Config | None = None, *, state: AppState | None = None) -> F
         try:
             if login:
                 return JSONResponse(open_site(login, url=url or None))
-            return JSONResponse(open_for_shop(st.cfg, shop, url=url or None))
+            return JSONResponse(
+                open_for_shop(
+                    st.cfg,
+                    shop,
+                    url=url or None,
+                    wait=wait,
+                    wait_minutes=wait_minutes,
+                )
+            )
         except AlreadyOpen as exc:
             return JSONResponse({"error": str(exc)}, status_code=409)
         except ValueError as exc:
@@ -1011,6 +1049,20 @@ def create_app(cfg: Config | None = None, *, state: AppState | None = None) -> F
                     recursive=payload.recursive,
                     overwrite=payload.overwrite,
                 )
+            elif kind == "resize":
+                fn = toolbox.resize.run if not dry_run else toolbox.resize.plan
+                report = fn(
+                    folder,
+                    width=payload.width,
+                    height=payload.height,
+                    target_format=payload.target_format,
+                    fit=payload.fit,
+                    quality=payload.quality,
+                    output_dir=output_dir,
+                    recursive=payload.recursive,
+                    overwrite=payload.overwrite,
+                    inplace=payload.inplace,
+                )
             else:
                 fn = toolbox.merge.run if not dry_run else toolbox.merge.plan
                 report = fn(folder, output_file=output_file, add_source_row=payload.add_source_row)
@@ -1056,6 +1108,80 @@ def create_app(cfg: Config | None = None, *, state: AppState | None = None) -> F
         if not payload.live:
             return JSONResponse({"error": "这是写文件的操作，需要明确确认"}, status_code=400)
         return _toolbox_call("convert", payload, request.app.state.temu.cfg, dry_run=False)
+
+    @app.post("/api/toolbox/resize/scan")
+    def api_toolbox_resize_scan(request: Request, payload: ToolboxResizePayload) -> JSONResponse:
+        return _toolbox_call("resize", payload, request.app.state.temu.cfg, dry_run=True)
+
+    @app.post("/api/toolbox/resize/run")
+    def api_toolbox_resize_run(request: Request, payload: ToolboxResizePayload) -> JSONResponse:
+        if not payload.live:
+            return JSONResponse({"error": "这是写文件的操作，需要明确确认"}, status_code=400)
+        return _toolbox_call("resize", payload, request.app.state.temu.cfg, dry_run=False)
+
+    @app.post("/api/toolbox/combo/scan")
+    def api_toolbox_combo_scan(
+        request: Request, payload: ToolboxComboPayload
+    ) -> JSONResponse:
+        """一条龙预览：尺寸与格式 + 11 位 ID 都只模拟，一个字节都不写。"""
+        from temu_bot import toolbox
+
+        st: AppState = request.app.state.temu
+        folder = Path(payload.folder)
+        if not folder.is_dir():
+            return JSONResponse({"error": f"文件夹不存在：{folder}"}, status_code=400)
+        try:
+            report = toolbox.combo.plan(
+                st.cfg,
+                folder,
+                width=payload.width,
+                height=payload.height,
+                target_format=payload.target_format,
+                fit=payload.fit,
+                quality=payload.quality,
+                id_length=payload.id_length,
+                csv_path=Path(payload.csv_path) if payload.csv_path else None,
+                export_format=payload.export_format,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.exception("工具箱 combo 预览出错")
+            return JSONResponse({"error": f"预览出错：{exc}"}, status_code=500)
+        return JSONResponse({"tool": "combo", "folder": str(folder), **report.to_view()})
+
+    @app.post("/api/toolbox/combo/start")
+    def api_toolbox_combo_start(
+        request: Request, payload: ToolboxComboPayload
+    ) -> JSONResponse:
+        """真执行（后台线程）：先尺寸与格式，再 11 位 ID + 导清单 + 还原。"""
+        st: AppState = request.app.state.temu
+        try:
+            return JSONResponse(
+                st.combo.start(
+                    st.cfg,
+                    ComboRequest(
+                        folder=payload.folder,
+                        width=payload.width,
+                        height=payload.height,
+                        target_format=payload.target_format,
+                        fit=payload.fit,
+                        quality=payload.quality,
+                        id_length=payload.id_length,
+                        csv_path=payload.csv_path,
+                        export_format=payload.export_format,
+                    ),
+                )
+            )
+        except ComboBusy as exc:
+            return JSONResponse({"error": str(exc)}, status_code=409)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("启动 combo 失败")
+            return JSONResponse({"error": f"启动失败：{exc}"}, status_code=500)
+
+    @app.get("/api/toolbox/combo/status")
+    def api_toolbox_combo_status(request: Request) -> dict[str, Any]:
+        return request.app.state.temu.combo.snapshot()
 
     @app.post("/api/toolbox/merge/scan")
     def api_toolbox_merge_scan(request: Request, payload: ToolboxMergePayload) -> JSONResponse:

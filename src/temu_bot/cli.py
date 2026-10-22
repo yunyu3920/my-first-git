@@ -43,7 +43,8 @@ session_app = typer.Typer(no_args_is_help=True, help="登录态（接口客户�
 dxm_app = typer.Typer(no_args_is_help=True, help="店小秘接口（只读命令可直接用）")
 images_app = typer.Typer(no_args_is_help=True, help="图片管线（按 Temu 规格出图，原图只读）")
 toolbox_app = typer.Typer(
-    no_args_is_help=True, help="图片工具箱（SKU 重命名 / 导出清单 / 格式转换 / Excel 合并）"
+    no_args_is_help=True,
+    help="图片工具箱（SKU 重命名 / 导出清单 / 格式转换 / 尺寸与格式 / Excel 合并）",
 )
 diagnose_app = typer.Typer(no_args_is_help=True, help="接口自检（店小秘改版后排障）")
 app.add_typer(config_app, name="config")
@@ -469,9 +470,9 @@ def browser_selfcheck(
 @app.command()
 def login(
     shop: str = typer.Option(
-        ...,
+        "default",
         "--shop",
-        help="登录身份（profiles/<这个>；不要求在 config.shops 里登记过）",
+        help="登录身份（profiles/<这个>；不要求在 config.shops 里登记过）。不传就用 default",
     ),
     url: str | None = typer.Option(None, "--url", help="起始地址，默认取 config/selectors/temu.yaml 的 urls.start"),
     until_closed: bool = typer.Option(
@@ -493,6 +494,8 @@ def login(
     所以必须边等边存，不能等关了再存）。
     """
     cfg = _boot()
+    # 显式传空字符串也当 default——绝不能生成 session_.json 这种没有名字的会话
+    shop = (shop or "").strip() or "default"
     # 默认打开**店小秘**（上架走的是它，不是 Temu 卖家后台）。
     # 选择器配置缺失时也必须回退到店小秘——打包版没带 config/selectors/ 时就是这种情况。
     start = login_start_url(cfg, url)
@@ -1712,6 +1715,53 @@ def toolbox_convert(
         "overwrite": overwrite,
     }
     report = toolbox.convert.run(folder, **kwargs) if live else toolbox.convert.plan(folder, **kwargs)
+    _print_report(report, live=live)
+
+
+@toolbox_app.command("resize")
+def toolbox_resize(
+    directory: str = typer.Option(..., "--dir", help="图片文件夹"),
+    width: int = typer.Option(1340, "--width", help="目标宽（像素）"),
+    height: int = typer.Option(1785, "--height", help="目标高（像素）"),
+    to: str = typer.Option("jpg", "--to", help="目标格式：jpg / png / webp"),
+    fit: str = typer.Option(
+        "cover",
+        "--fit",
+        help="缩放方式：cover 裁剪填满 / contain 完整保留留白 / stretch 拉伸",
+    ),
+    quality: int = typer.Option(95, "--quality", help="JPG/WEBP 质量 1-100"),
+    out_dir: str = typer.Option("", "--out", help="仅 --no-inplace 时用：输出目录；留空 = 跟源文件同目录"),
+    recursive: bool = typer.Option(False, "--recursive", help="连子文件夹一起处理"),
+    overwrite: bool = typer.Option(False, "--overwrite", help="仅 --no-inplace 时用：覆盖同名结果"),
+    inplace: bool = typer.Option(
+        True,
+        "--inplace/--no-inplace",
+        help="覆盖原图、保持文件名（默认）；--no-inplace 另存为 <原名>_<宽>x<高>",
+    ),
+    live: bool = typer.Option(False, "--live", help="真的处理；默认只预览"),
+) -> None:
+    """尺寸与格式：统一改成指定宽高 + jpg/png/webp（默认 1340×1785 / JPG）。
+
+    **默认覆盖原图、保持文件名**（扩展名统一成目标格式），
+    这样下一步「11 位 ID」扫同一文件夹时不会连原图一起处理。
+    加 `--no-inplace` 才另存副本。
+    """
+    from temu_bot import toolbox
+
+    _boot()
+    folder = Path(directory)
+    kwargs = {
+        "width": width,
+        "height": height,
+        "target_format": to,
+        "fit": fit,
+        "quality": quality,
+        "output_dir": Path(out_dir) if out_dir else None,
+        "recursive": recursive,
+        "overwrite": overwrite,
+        "inplace": inplace,
+    }
+    report = toolbox.resize.run(folder, **kwargs) if live else toolbox.resize.plan(folder, **kwargs)
     _print_report(report, live=live)
 
 

@@ -20,7 +20,6 @@ from __future__ import annotations
 import io
 import json
 import logging
-import time
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -131,14 +130,13 @@ class ShopLookup:
         )
 
 
-# 解出来的结果缓存几秒：一批几十行、店铺名往往一样，不必每行都去问一遍接口。
-# 缓存时间很短，用户中途登录/切店后重新跑就能立刻生效。
-_LOOKUP_TTL_SECONDS = 20.0
-_LOOKUP_CACHE: dict[tuple[str, str], tuple[float, ShopLookup]] = {}
-
-
 def clear_lookup_cache() -> None:
-    _LOOKUP_CACHE.clear()
+    """兼容旧调用：**现在不做任何缓存**。
+
+    店铺核对每次都实时读登录账号的 `userIn.shopMap`，不把结果记在程序里；
+    用户切店/重新登录后，下一行立刻按新状态核对。
+    """
+    return None
 
 
 def find_login_for_shop(
@@ -160,11 +158,6 @@ def find_login_for_shop(
     shop_name = (shop_name or "").strip()
     if not shop_name:
         return ShopLookup(shop=shop_name, scanned=[{"login": "-", "reason": "表里没填店铺名"}])
-
-    key = (str(cfg.root), shop_name)
-    cached = _LOOKUP_CACHE.get(key)
-    if cached is not None and time.monotonic() - cached[0] < _LOOKUP_TTL_SECONDS:
-        return cached[1]
 
     if candidates is None:
         candidates = [i.login for i in cfg.logins() if i.has_session]
@@ -205,7 +198,6 @@ def find_login_for_shop(
         result.scanned.append({"login": login, "reason": "账号里没有这家店"})
 
     result.available = seen_shops
-    _LOOKUP_CACHE[key] = (time.monotonic(), result)
     return result
 
 

@@ -71,14 +71,6 @@
         <div id="previewBox" class="card"><div class="kv">未选择行</div></div>
 
         <div class="field">
-          <label>运行方式</label>
-          <select id="mode">
-            <option value="live">真实执行（会建商品、传图、写数据）</option>
-            <option value="dry">干跑（不写任何数据）</option>
-          </select>
-        </div>
-
-        <div class="field">
           <label>店铺核对</label>
           <div class="toolbar">
             <button class="ghost" id="checkShopBtn">核对店小秘店铺</button>
@@ -94,7 +86,7 @@
           <div class="msg" id="shopMsg"></div>
         </div>
 
-        <div id="liveExtra" style="display:none">
+        <div id="liveExtra">
           <div class="field">
             <label>保存后的动作</label>
             <select id="op">
@@ -243,8 +235,52 @@
 
       <div class="stepblock">
         <div class="head">
-          <span class="no">2</span><h3>11 位 ID - 导表 - 保留 11 位 ID</h3>
+          <span class="no">2</span><h3>尺寸与格式 + 11 位 ID - 导表 - 保留 11 位 ID</h3>
         </div>
+        <div class="sub">
+          点一次「开始执行」会按顺序做两步：<br>
+          ① 把图片统一改成 <b>1340 × 1785 / JPG</b>，<b>覆盖原图、文件名不变</b>
+          （png 等会转成同名 jpg 并删掉原文件）；<br>
+          ② 加 11 位 ID → 导出对照清单 → 还原成纯 11 位 ID。
+        </div>
+
+        <div class="grid2">
+          <div class="field">
+            <label>常用规格</label>
+            <select id="tbSizePreset">
+              <option value="1340x1785:jpg" selected>1340 × 1785 · JPG（默认，Temu 主图）</option>
+              <option value="800x800:jpg">800 × 800 · JPG（素材图）</option>
+              <option value="custom">自定义</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>格式</label>
+            <select id="tbFormat">
+              <option value="jpg" selected>JPG</option>
+              <option value="png">PNG</option>
+              <option value="webp">WEBP</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>宽（像素）</label>
+            <input type="number" id="tbWidth" value="1340" min="16" max="10000">
+          </div>
+          <div class="field">
+            <label>高（像素）</label>
+            <input type="number" id="tbHeight" value="1785" min="16" max="10000">
+          </div>
+        </div>
+
+        <div class="field">
+          <label>缩放方式</label>
+          <select id="tbFit">
+            <option value="cover" selected>裁剪填满（推荐）</option>
+            <option value="contain">完整保留（留白）</option>
+            <option value="stretch">拉伸</option>
+          </select>
+        </div>
+
+        <div class="sub" style="margin-top:8px">11 位 ID 与清单</div>
         <div class="grid2">
           <div class="field">
             <label>ID 位数</label>
@@ -252,7 +288,7 @@
           </div>
           <div class="field">
             <label>清单输出路径</label>
-            <input type="text" id="tbExportPath" placeholder="留空 = 写进图片文件夹">
+            <input type="text" id="tbExportPath" placeholder="留空 = 写进图片文件夹；也可填文件夹或 .csv/.xlsx">
           </div>
         </div>
         <div class="toolbar">
@@ -263,16 +299,17 @@
             <input type="checkbox" id="tbExportXlsx" checked> 生成 XLSX（Excel 打开用这个，ID 是文本）
           </label>
         </div>
-        <div class="toolbar">
-          <button class="ghost" id="tbRenameScan">预览</button>
-          <button class="primary" id="tbRenameRun" disabled>执行</button>
-          <span class="spacer"></span>
-          <span class="count" id="tbRenameCount"></span>
-        </div>
-        <div id="tbRenameBox"></div>
-        <div class="msg" id="tbRenameMsg"></div>
-      </div>
 
+        <div class="toolbar">
+          <button class="ghost" id="tbComboScan">预览</button>
+          <button class="primary" id="tbComboRun" disabled>开始执行</button>
+          <span class="spacer"></span>
+          <span class="count" id="tbComboCount"></span>
+        </div>
+        <div class="progress"><i id="tbComboBar"></i></div>
+        <div class="msg" id="tbComboMsg"></div>
+        <div id="tbComboBox"></div>
+      </div>
 
       <div class="stepblock">
         <div class="head">

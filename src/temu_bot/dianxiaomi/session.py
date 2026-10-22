@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -26,6 +27,19 @@ def _safe(name: str) -> str:
 
 def session_path(cfg: Config, shop: str) -> Path:
     return cfg.data_dir / SESSION_DIR / f"session_{_safe(shop)}.json"
+
+
+def _write_json_atomic(path: Path, payload: Any) -> None:
+    """原子写：先写临时文件再替换。
+
+    登录进程开着浏览器时会**每 5 秒**存一次登录态，而上架那边每一行都要读这个文件。
+    直接 `write_text` 有概率被读到写了一半的 JSON（"登录态文件损坏"），
+    所以这里改成 tmp + os.replace——读到的要么是旧的、要么是新的，不会读到半截。
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
 
 
 @dataclass(slots=True)
@@ -48,7 +62,7 @@ class ShopSession:
             "cookies": self.cookies,
             "storage_origins": self.storage_origins,
         }
-        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        _write_json_atomic(path, payload)
         try:
             path.chmod(0o600)
         except OSError:
@@ -140,7 +154,7 @@ def save_session_from_context(cfg: Config, shop: str, context: Any, *, source: s
     # localStorage 里可能藏着前端要用的 token，单独存一份备查（不进 git）
     if origins:
         extra = path.with_name(path.stem + "_localstorage.json")
-        extra.write_text(json.dumps(origins, ensure_ascii=False, indent=2), encoding="utf-8")
+        _write_json_atomic(extra, origins)
         log.info("另存 localStorage：%s", extra)
 
     return session

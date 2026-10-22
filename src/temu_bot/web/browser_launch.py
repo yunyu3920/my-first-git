@@ -34,6 +34,11 @@ _OPEN: dict[str, "Launch"] = {}
 # 打开后多久算"超时自动收工"（跟 CLI 的 --hold-minutes 一致）
 DEFAULT_HOLD_MINUTES = 30
 
+# 全新用户点「开始上架」时：没有登录态就直接开登录窗口，并等这么久（分钟）
+# 等的是"表里那家店真的出现在登录账号里"，不是干等窗口关掉。
+LOGIN_WAIT_MINUTES = 10
+LOGIN_POLL_SECONDS = 3.0
+
 
 @dataclass
 class Launch:
@@ -141,7 +146,12 @@ def pick_login_for_open(cfg: Any, shop_name: str) -> tuple[str, str]:
 
     infos = cfg.logins()
     if not infos:
-        raise ValueError("一个登录身份都没有——先用 1-登录店小秘.bat 登录一次")
+        # 全新机器：还没有任何会话文件、config 里也没登记店铺。
+        # **不报错**——用默认身份把登录窗口开起来，登录完就能接着上架。
+        return (
+            "default",
+            "还没有登录过店小秘——先打开默认身份，登录成功后会自动继续上架。",
+        )
 
     hint = next((i for i in infos if i.shop_hint and i.shop_hint.strip() == (shop_name or "").strip()), None)
     if hint is not None:
@@ -160,11 +170,116 @@ def pick_login_for_open(cfg: Any, shop_name: str) -> tuple[str, str]:
     return first.login, why
 
 
-def open_for_shop(cfg: Any, shop_name: str, *, url: str | None = None,
-                  hold_minutes: int = DEFAULT_HOLD_MINUTES) -> dict:
-    """按**表格里的店铺名**决定开哪个浏览器（界面不再让人手选身份）。"""
+def _session_exists(cfg: Any, login: str) -> bool:
+    from temu_bot.dianxiaomi.session import session_path
+
+    return session_path(cfg, login).is_file()
+
+
+def _login_usable(cfg: Any, login: str) -> bool:
+    """这份登录态现在能不能调接口（表格没填店铺名时用它兜底）。"""
+    from temu_bot.dianxiaomi.client import DxmClient
+
+    try:
+        with DxmClient(cfg, login) as client:
+            return bool(client.health_check().get("ok"))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def wait_for_shop_login(
+    cfg: Any,
+    shop_name: str,
+    login: str,
+    *,
+    timeout_s: float,
+    process: Any = None,
+) -> bool:
+    """等「表里这家店」真的出现在登录账号里。
+
+    为什么不用 `health_check()`：它只要接口能通就算成功，账号里**没有表里这家店**
+    时也会误判。这里用 `find_login_for_shop()`，店真的出现了才返回 True。
+
+    浏览器窗口关掉（process 退出）就不再傻等——最后再确认一次就收工。
+    """
+    from temu_bot.dianxiaomi.client import find_login_for_shop
+
+    shop = (shop_name or "").strip()
+
+    def ready() -> bool:
+        # 登录进程每隔几秒存一次会话；find_login_for_shop 每次都实时问，能看到最新那份
+        try:
+            if shop:
+                return bool(find_login_for_shop(cfg, shop).ok)
+            return _login_usable(cfg, login)
+        except Exception:  # noqa: BLE001
+            return False
+
+    deadline = time.monotonic() + max(1.0, float(timeout_s))
+    while True:
+        if ready():
+            return True
+        if process is not None and process.poll() is not None:
+            return ready()          # 窗口关了：最后再确认一次
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(LOGIN_POLL_SECONDS)
+
+
+def open_for_shop(
+    cfg: Any,
+    shop_name: str,
+    *,
+    url: str | None = None,
+    hold_minutes: int = DEFAULT_HOLD_MINUTES,
+    wait: bool = False,
+    wait_minutes: int = LOGIN_WAIT_MINUTES,
+) -> dict:
+    """按**表格里的店铺名**决定开哪个浏览器（界面不再让人手选身份）。
+
+    `wait=True` 时：如果这个身份还没有会话（全新用户），就开登录窗口并
+    **等登录完成**再返回——控制台点一次「开始」就能一路走完，不用先手动登录。
+    """
     login, why = pick_login_for_open(cfg, shop_name)
-    result = open_site(login, url=url, hold_minutes=hold_minutes)
+    had_session = _session_exists(cfg, login)
+
+    try:
+        result = open_site(login, url=url, hold_minutes=hold_minutes)
+    except AlreadyOpen:
+        if not wait:
+            raise
+        result = {
+            "login": login,
+            "running": True,
+            "seconds": 0,
+            "exit_code": None,
+            "message": "浏览器窗口已经开着，继续等你登录/切店…",
+        }
+
+    if wait:
+        launch = _OPEN.get(login)
+        process = launch.process if launch is not None else None
+        ok = wait_for_shop_login(
+            cfg,
+            shop_name,
+            login,
+            timeout_s=wait_minutes * 60,
+            process=process,
+        )
+        result["logged_in"] = ok
+        if ok:
+            result["message"] = "登录成功，继续上架…"
+        else:
+            # 等满 10 分钟还没登录好 → **取消这次上架**，并把登录窗口关掉，
+            # 不留下一个没人管的浏览器窗口。
+            close(login)
+            result["message"] = (
+                f"等了 {wait_minutes} 分钟还没登录完成，已取消上架（一行都不会跑）。"
+                f"请确认账号里有表里这家店「{shop_name}」，重新点「开始上架」再来。"
+            )
+    else:
+        result["logged_in"] = had_session
+
     return {**result, "login": login, "why": why, "message": f"{why}\n{result['message']}"}
 
 

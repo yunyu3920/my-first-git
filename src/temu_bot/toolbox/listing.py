@@ -138,7 +138,13 @@ def write_xlsx(path: Path, entries: list[Entry]) -> None:
 
 
 def _backup(path: Path) -> Path:
-    """旧清单改名保留。名字带时间戳，一秒内连跑两次也不会互相盖掉。"""
+    """旧清单改名保留。名字带时间戳，一秒内连跑两次也不会互相盖掉。
+
+    **绝不能对文件夹做改名**：用户如果把图片文件夹填进「清单输出路径」，
+    旧写法会把整个文件夹改名成 `.bak-时间戳`——这是不可接受的。
+    """
+    if path.is_dir():
+        raise ListingError(f"输出路径是文件夹，不是文件：{path}。没有动它。")
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     bak = path.with_name(f"{path.name}.bak-{stamp}")
     path.rename(bak)
@@ -155,8 +161,17 @@ def _export_core(
     if fmt not in FORMATS:
         raise ListingError(NO_FORMAT)
 
-    csv_path = Path(csv_path) if csv_path else folder / CSV_NAME
-    xlsx_path = csv_path.with_suffix(".xlsx")
+    # 用户很可能把**图片文件夹**直接填进「清单输出路径」。
+    # 这种情况当成"输出目录"，清单写进这个目录；绝不能把目录本身当文件名。
+    base = Path(csv_path) if csv_path else folder
+    if base.is_dir() or base.suffix.lower() not in (".csv", ".xlsx"):
+        base = base / CSV_NAME
+    if base.suffix.lower() == ".xlsx":
+        xlsx_path = base
+        csv_path = base.with_suffix(".csv")
+    else:
+        csv_path = base
+        xlsx_path = base.with_suffix(".xlsx")
     targets: list[tuple[str, Path]] = []
     if fmt != "xlsx":
         targets.append(("CSV", csv_path))
@@ -181,12 +196,24 @@ def _export_core(
     for _kind, path in targets:
         if not path.exists():
             continue
+        if path.is_dir():
+            blocked.add(path)
+            items.append(
+                ToolItem(
+                    path.name,
+                    "备份旧清单",
+                    str(path),
+                    FAILED,
+                    f"输出路径是个文件夹，不是文件：{path}。没有动它。",
+                )
+            )
+            continue
         try:
             bak = _backup(path)
             items.append(
                 ToolItem(path.name, "备份旧清单", str(bak), OK, "同名文件已存在，先改名保留")
             )
-        except OSError as exc:
+        except (OSError, ListingError) as exc:
             blocked.add(path)
             items.append(
                 ToolItem(

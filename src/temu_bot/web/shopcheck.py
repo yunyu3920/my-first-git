@@ -18,7 +18,7 @@ from __future__ import annotations
 from typing import Any
 
 from temu_bot.config import Config
-from temu_bot.dianxiaomi.client import clear_lookup_cache, find_login_for_shop
+from temu_bot.dianxiaomi.client import find_login_for_shop
 from temu_bot.sheet.table import SheetTable
 
 
@@ -66,10 +66,8 @@ def precheck_shops(cfg: Config, row_indexes: list[int]) -> dict[str, Any]:
             "checks": [],
         }
 
-    # 每次核对都重新问一次接口：用户可能刚在浏览器里登好、或切了店，
-    # 20 秒的查询缓存会把"刚登录"误判成"还没登录"。
-    clear_lookup_cache()
-
+    # 每次核对都实时问接口：用户可能刚在浏览器里登好、或切了店。
+    # （find_login_for_shop 本身已经不做缓存，这里不再需要清缓存。）
     checks: list[dict[str, Any]] = []
     for shop, rows in shop_rows.items():
         if not shop:
